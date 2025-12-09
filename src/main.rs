@@ -1,4 +1,9 @@
+use server::error::*;
 
-fn main() {
-   
+fn main() -> Result<()> {
+
+
+
+
+    Ok(())
 }
