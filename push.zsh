@@ -1,4 +1,4 @@
-git add -A && \
+git add --all && \
 git commit -m "$1" && \
 git push origin aelmir&& \
-git push webserver origin
+git push personal origin
