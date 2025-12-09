@@ -1,124 +1,155 @@
-// use std::{
-//     io::{Read, Write},
-//     net::{TcpListener, TcpStream},
-//     time::Duration,
-// };
-
-// use server::error::*;
-
-// const ADDRESS: &str = "127.0.0.1:8080";
-// const BUFFER_SIZE: usize = 512;
-
-// fn main() -> Result<()> {
-//     let listener = TcpListener::bind(ADDRESS)?;
-//     listener.set_nonblocking(true)?;
-
-//     println!("Server listening on http://{}", ADDRESS);
-
-//     let mut clients: Vec<TcpStream> = Vec::new();
-//     let mut buffer = [0u8; BUFFER_SIZE];
-
-//     loop {
-//         // Accept new clients (nonblocking)
-//         match listener.accept() {
-//             Ok((mut stream, addr)) => {
-//                 stream.set_nonblocking(true)?; // IMPORTANT!
-//                 println!("New client: {}", addr);
-//                 clients.push(stream);
-//             }
-//             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-//                 // No new connections right now
-//             }
-//             Err(e) => {
-//                 eprintln!("Accept error: {}", e);
-//             }
-//         }
-
-//         // Poll clients
-//         let mut i = 0;
-//         while i < clients.len() {
-//             let mut remove_client = false;
-
-//             match clients[i].read(&mut buffer) {
-//                 Ok(0) => {
-//                     println!("Client disconnected");
-//                     remove_client = true;
-//                 }
-//                 Ok(bytes_read) => {
-//                     if bytes_read > 0 {
-//                         let data = &buffer[..bytes_read];
-//                         println!("Received {} bytes: {:?}", bytes_read, data);
-
-//                         if let Err(e) = clients[i].write_all(data) {
-//                             eprintln!("Write error: {}", e);
-//                             remove_client = true;
-//                         }
-//                     }
-//                 }
-//                 Err(e) => {
-//                     if e.kind() != std::io::ErrorKind::WouldBlock {
-//                         eprintln!("Read error: {}", e);
-//                         remove_client = true;
-//                     }
-//                 }
-//             }
-
-//             if remove_client {
-//                 clients.remove(i);
-//             } else {
-//                 i += 1;
-//             }
-//         }
-
-//         // Prevent 100% CPU spinning
-//         // std::thread::sleep(Duration::from_millis(5));
-//     }
-// }
-
-use server::error::*;
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream}
+    pin::Pin,
+    sync::{Arc, Condvar, Mutex},
+    task::*,
 };
-const ADDRESS: &str = "127.0.0.1:8080";
-const BUFFER_SIZE: usize = 512;
-fn handle_client(mut stream: TcpStream) {
-    println!("New connection from : {}", stream.peer_addr().unwrap());
-    let mut buffer = [0; BUFFER_SIZE];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                println!("Client disconnected");
-                break;
+
+// use futures::lock::Mutex;
+use server::error::*;
+
+// --- Part 1: The Task/Future ---
+// A simple Future that completes after being polled a specific number of times.
+struct DelayedPrinter {
+    remaining_polls: usize,
+    message: String,
+}
+
+impl Future for DelayedPrinter {
+    type Output = ();
+
+    // The core of async execution. The executor calls this.
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        if self.remaining_polls == 0 {
+            println!("Future finished : {}", self.message);
+            Poll::Ready(())
+        } else {
+            // 1. We cannot proceed, so we must register the Waker.
+            // In a real runtime, this Waker would be registered with the I/O driver
+            // or Timer system waiting for a *real* external event.
+            // Here, we just print the Waker registration.
+            let waker = cx.waker().clone();
+            println!(
+                "Future pending: {}. Remaining polls: {}",
+                self.message, self.remaining_polls
+            );
+
+            // 2. We simulate the external event happening later by waking ourselves up.
+            // This simulates the kernel/I/O driver calling wake() when data arrives.
+            // We use a separate thread for the wakeup to show the cross-thread nature.
+            let remaining_polls = self.remaining_polls;
+            std::thread::spawn(move || {
+                // Wait a moment to simulate I/O delay
+                println!(
+                    "waking up task for polls: {} (Simulated I/O Ready)",
+                    remaining_polls
+                );
+                waker.wake();
+            });
+
+            self.remaining_polls -= 1;
+
+            Poll::Pending
+        }
+    }
+}
+
+// --- Part 2: The Executor (The Event Loop) ---
+// This is the single-threaded component that drives the polling.
+
+struct Executor {
+    task_queue: Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>,
+    condvar: Arc<Condvar>,
+}
+
+impl Executor {
+    fn new() -> Self {
+        Executor {
+            task_queue: Arc::new(Mutex::new(Vec::new())),
+            condvar: Arc::new(Condvar::new()),
+        }
+    }
+
+    fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+        let mut queue = self.task_queue.lock().unwrap();
+        queue.push(Box::pin(future))
+    }
+
+    fn run(&self) {
+        let queue_clone = self.task_queue.clone();
+        let condvar_clone = self.condvar.clone();
+
+        let raw_waker = RawWaker::new(
+            Arc::into_raw(Arc::new((queue_clone, condvar_clone))) as *const (),
+            &VTABLE,
+        );
+
+        let waker = unsafe { Waker::from_raw(raw_waker) };
+
+        let mut context = Context::from_waker(&waker);
+
+        loop {
+            let mut queue = self.task_queue.lock().unwrap();
+
+            if queue.is_empty() {
+                println!("\n😴 Executor blocked (No ready tasks). Waiting for wake...");
+                queue = self.condvar.wait(queue).unwrap(); // Thread blocks here
             }
-            Ok(bytes_read) => {
-                let data = &buffer[..bytes_read];
-                println!("Received {} bytes: {:?}", bytes_read, data);
-                if stream.write_all(data).is_err() {
-                    println!("Failed to flush stream.");
-                    break;
+
+            let mut pending_tasks = Vec::new();
+
+            while let Some(mut task) = queue.pop() {
+                match task.as_mut().poll(&mut context) {
+                    Poll::Ready(_) => {}
+                    Poll::Pending => {
+                        pending_tasks.push(task);
+                    }
                 }
             }
-            Err(e) => {
-                eprintln!("An error occurred: {}", e);
+
+            queue.append(&mut pending_tasks);
+
+            if queue.is_empty() && pending_tasks.is_empty() {
+                println!("\n✨ Executor finished all tasks.");
                 break;
             }
         }
     }
 }
+
+const VTABLE: RawWakerVTable = RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
+
+unsafe fn clone_waker(data: *const ()) -> RawWaker {
+    let arc = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
+    let new_arc = Arc::clone(&arc);
+    let _ = Arc::into_raw(arc);
+    RawWaker::new(Arc::into_raw(new_arc) as *const (), &VTABLE)
+}
+
+unsafe fn wake(data: *const ()) {
+    let arc = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
+    arc.1.notify_one(); // Condvar notification unblocks the run loop
+    // Re-queueing the task logic is handled by the Future itself
+    // In a real runtime, the Waker's payload would include the task ID to be re-queued.
+}
+// Required to implement wake_by_ref and drop_waker, which are simpler in this example.
+unsafe fn wake_by_ref(data: *const ()) {
+    wake(data);
+}
+unsafe fn drop_waker(data: *const ()) {
+    // Decrement the Arc reference count
+    let _ = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
+}
+
 fn main() -> Result<()> {
-    let listener = TcpListener::bind(ADDRESS)?;
-    println!("Server listening on http://{}", ADDRESS);
-    listener.set_nonblocking(true)?;
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                handle_client(stream);
-            }
-            Err(e) => {
-                eprintln!("Connection failed: {}", e);
-            }
-        }
-    }
+    let executor = Executor::new();
+    executor.spawn(DelayedPrinter { remaining_polls:3, message: "Task A".to_string() });
+    executor.spawn(DelayedPrinter { remaining_polls:2, message: "Task B".to_string() });
+    //  executor.spawn(DelayedPrinter { remaining_polls:2, message: "Task C".to_string() });
+    
+    executor.run();
+    
     Ok(())
 }
