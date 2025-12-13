@@ -1,155 +1,124 @@
-use std::{
-    pin::Pin,
-    sync::{Arc, Condvar, Mutex},
-    task::*,
-};
+use std::collections::HashMap;
 
-// use futures::lock::Mutex;
-use server::error::*;
+use server::error::Result;
 
-// --- Part 1: The Task/Future ---
-// A simple Future that completes after being polled a specific number of times.
-struct DelayedPrinter {
-    remaining_polls: usize,
-    message: String,
+#[derive(Debug, PartialEq)]
+pub enum ParsingState {
+    RequestLine,
+    Headers,
+    Body(usize), // Content-Length
+    Complete,
+    Error,
 }
 
-impl Future for DelayedPrinter {
-    type Output = ();
+pub struct HttpRequest {
+    pub state: ParsingState,
+    pub methode: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+    buffer: Vec<u8>,
+}
 
-    // The core of async execution. The executor calls this.
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        if self.remaining_polls == 0 {
-            println!("Future finished : {}", self.message);
-            Poll::Ready(())
-        } else {
-            // 1. We cannot proceed, so we must register the Waker.
-            // In a real runtime, this Waker would be registered with the I/O driver
-            // or Timer system waiting for a *real* external event.
-            // Here, we just print the Waker registration.
-            let waker = cx.waker().clone();
+impl HttpRequest {
+    pub fn new() -> Self {
+        HttpRequest {
+            state: ParsingState::RequestLine,
+            methode: String::new(),
+            path: String::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+            buffer: Vec::new(),    
+        }
+    }
+
+    pub fn append_data(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub fn parse_request_line(&mut self) -> std::result::Result<(), &'static str> {
+        
+        if let Some(crlf_pos) = find_crlf(&self.buffer) {
+            println!("paaaaaaaaaaaaaaaaaaaaaaaaaaarsssssssssssssssssse {crlf_pos}");
+            let line_bytes = self.buffer.drain(..crlf_pos + 2).collect();
+            let line = match String::from_utf8(line_bytes) {
+                Ok(line) => line.trim_end_matches("\r\n").to_string(),
+                Err(_) => return Err("invalid utf-8 in request line"),
+            };
+
+            let parts = line.splitn(3, ' ').collect::<Vec<&str>>();
+            if parts.len() != 3 {
+                return Err("request line malformed");
+            }
+
+            self.methode = parts[0].to_string();
+            self.path = parts[1].to_string();
+
+            let version = parts[2];
+            if version != "HTTP/1.1" {
+                return Err("http version not supported use HTTP/1.1");
+            }
             println!(
-                "Future pending: {}. Remaining polls: {}",
-                self.message, self.remaining_polls
+                "parsed request line: {} {} {}",
+                self.methode, self.path, version
             );
 
-            // 2. We simulate the external event happening later by waking ourselves up.
-            // This simulates the kernel/I/O driver calling wake() when data arrives.
-            // We use a separate thread for the wakeup to show the cross-thread nature.
-            let remaining_polls = self.remaining_polls;
-            std::thread::spawn(move || {
-                // Wait a moment to simulate I/O delay
-                println!(
-                    "waking up task for polls: {} (Simulated I/O Ready)",
-                    remaining_polls
-                );
-                waker.wake();
-            });
+            self.state = ParsingState::Headers;
 
-            self.remaining_polls -= 1;
-
-            Poll::Pending
-        }
-    }
-}
-
-// --- Part 2: The Executor (The Event Loop) ---
-// This is the single-threaded component that drives the polling.
-
-struct Executor {
-    task_queue: Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>,
-    condvar: Arc<Condvar>,
-}
-
-impl Executor {
-    fn new() -> Self {
-        Executor {
-            task_queue: Arc::new(Mutex::new(Vec::new())),
-            condvar: Arc::new(Condvar::new()),
+            Ok(())
+        } else {
+            Err("Incomplete request line")
         }
     }
 
-    fn spawn(&self, future: impl Future<Output = ()> + 'static) {
-        let mut queue = self.task_queue.lock().unwrap();
-        queue.push(Box::pin(future))
-    }
-
-    fn run(&self) {
-        let queue_clone = self.task_queue.clone();
-        let condvar_clone = self.condvar.clone();
-
-        let raw_waker = RawWaker::new(
-            Arc::into_raw(Arc::new((queue_clone, condvar_clone))) as *const (),
-            &VTABLE,
-        );
-
-        let waker = unsafe { Waker::from_raw(raw_waker) };
-
-        let mut context = Context::from_waker(&waker);
-
+    pub fn parse(&mut self) -> std::result::Result<&ParsingState, &'static str> {
         loop {
-            let mut queue = self.task_queue.lock().unwrap();
+            match self.state {
+                ParsingState::RequestLine => {
+                    if let Err(err) = self.parse_request_line() {
+                        if err.contains("Incomplete") {
+                            return Ok(&self.state);
+                        }
 
-            if queue.is_empty() {
-                println!("\n😴 Executor blocked (No ready tasks). Waiting for wake...");
-                queue = self.condvar.wait(queue).unwrap(); // Thread blocks here
-            }
-
-            let mut pending_tasks = Vec::new();
-
-            while let Some(mut task) = queue.pop() {
-                match task.as_mut().poll(&mut context) {
-                    Poll::Ready(_) => {}
-                    Poll::Pending => {
-                        pending_tasks.push(task);
+                        self.state = ParsingState::Error;
+                        return Err(err);
                     }
                 }
-            }
-
-            queue.append(&mut pending_tasks);
-
-            if queue.is_empty() && pending_tasks.is_empty() {
-                println!("\n✨ Executor finished all tasks.");
-                break;
+                ParsingState::Headers => self.state = ParsingState::Complete,
+                ParsingState::Body(_) => self.state = ParsingState::Complete,
+                ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
             }
         }
     }
 }
 
-const VTABLE: RawWakerVTable = RawWakerVTable::new(clone_waker, wake, wake_by_ref, drop_waker);
-
-unsafe fn clone_waker(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
-    let new_arc = Arc::clone(&arc);
-    let _ = Arc::into_raw(arc);
-    RawWaker::new(Arc::into_raw(new_arc) as *const (), &VTABLE)
-}
-
-unsafe fn wake(data: *const ()) {
-    let arc = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
-    arc.1.notify_one(); // Condvar notification unblocks the run loop
-    // Re-queueing the task logic is handled by the Future itself
-    // In a real runtime, the Waker's payload would include the task ID to be re-queued.
-}
-// Required to implement wake_by_ref and drop_waker, which are simpler in this example.
-unsafe fn wake_by_ref(data: *const ()) {
-    wake(data);
-}
-unsafe fn drop_waker(data: *const ()) {
-    // Decrement the Arc reference count
-    let _ = Arc::from_raw(data as *const (Arc<Mutex<Vec<Pin<Box<dyn Future<Output = ()>>>>>>, Condvar));
+// \r\n finder
+fn find_crlf(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(2).position(|window| window == b"\r\n")
 }
 
 fn main() -> Result<()> {
-    let executor = Executor::new();
-    executor.spawn(DelayedPrinter { remaining_polls:3, message: "Task A".to_string() });
-    executor.spawn(DelayedPrinter { remaining_polls:2, message: "Task B".to_string() });
-    //  executor.spawn(DelayedPrinter { remaining_polls:2, message: "Task C".to_string() });
-    
-    executor.run();
-    
+    let http = "\
+GET /hello.htm HTTP/1.1\r\n\
+Host: www.tutorialspoint.com\r\n\
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36\r\n\
+Accept-Language: en-us\r\n\
+Connection: Keep-Alive\r\n\
+\r\n\
+";
+
+    let http2 = "POST /cgi-bin/process.cgi HTTP/1.1
+Host: www.tutorialspoint.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 45
+
+licenseID=string&content=string&paramsXML=string";
+
+    let mut httpRequest = HttpRequest::new();
+    let c = http.as_bytes();
+    println!("{c:?}");
+    httpRequest.buffer.extend_from_slice(c);
+    httpRequest.parse()?;
+
     Ok(())
 }
