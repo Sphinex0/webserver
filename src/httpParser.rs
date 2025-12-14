@@ -1,0 +1,195 @@
+use std::collections::HashMap;
+
+use server::error::Result;
+
+#[derive(Debug, PartialEq)]
+pub enum ParsingState {
+    RequestLine,
+    Headers,
+    Body(usize), // Content-Length
+    Complete,
+    Error,
+}
+
+pub struct HttpRequest {
+    pub state: ParsingState,
+    pub methode: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+    buffer: Vec<u8>,
+}
+
+impl HttpRequest {
+    pub fn new() -> Self {
+        HttpRequest {
+            state: ParsingState::RequestLine,
+            methode: String::new(),
+            path: String::new(),
+            headers: HashMap::new(),
+            body: Vec::new(),
+            buffer: Vec::new(),
+        }
+    }
+
+    pub fn append_data(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub fn parse_request_line(&mut self) -> std::result::Result<(), &'static str> {
+        if let Some(crlf_pos) = find_crlf(&self.buffer) {
+            let line_bytes = self.buffer.drain(..crlf_pos + 2).collect();
+            let line = match String::from_utf8(line_bytes) {
+                Ok(line) => line.trim_end_matches("\r\n").to_string(),
+                Err(_) => return Err("invalid utf-8 in request line"),
+            };
+
+            let parts = line.splitn(3, ' ').collect::<Vec<&str>>();
+            if parts.len() != 3 {
+                return Err("request line malformed");
+            }
+
+            self.methode = parts[0].to_string();
+            self.path = parts[1].to_string();
+
+            let version = parts[2];
+            if version != "HTTP/1.1" {
+                return Err("http version not supported use HTTP/1.1");
+            }
+            println!(
+                "parsed request line: {} {} {}",
+                self.methode, self.path, version
+            );
+
+            self.state = ParsingState::Headers;
+
+            Ok(())
+        } else {
+            Err("Incomplete request line")
+        }
+    }
+
+    fn parse_headers(&mut self) -> std::result::Result<(), &'static str> {
+        loop {
+            // 8Kb max header size
+            if self.buffer.len() > 8 * 1024 {
+                return Err("header passed the maximum size");
+            }
+
+            match extract_and_parse_header_line(&mut self.buffer)? {
+                Some((key, value)) => {
+                    if key == "Incomplete" {
+                        // return Ok(());
+                        return Err("Incomplete");
+                    }
+
+                    println!("Parsed header: {key}: {value}");
+                    self.headers.insert(key, value);
+                }
+                None => {
+                    let content_length = self
+                        .headers
+                        .get("Content-Length")
+                        .and_then(|val| val.parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    if content_length > 0 {
+                        self.state = ParsingState::Body(content_length);
+                    } else {
+                        self.state = ParsingState::Complete;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    pub fn parse(&mut self) -> std::result::Result<&ParsingState, &'static str> {
+        loop {
+            match self.state {
+                ParsingState::RequestLine => {
+                    if let Err(err) = self.parse_request_line() {
+                        if err.contains("Incomplete") {
+                            return Ok(&self.state);
+                        }
+
+                        self.state = ParsingState::Error;
+                        return Err(err);
+                    }
+                }
+                ParsingState::Headers => {
+                    if let Err(err) = self.parse_headers() {
+                        if err.contains("Incomplete") {
+                            return Ok(&self.state);
+                        }
+
+                        self.state = ParsingState::Error;
+                        return Err(err);
+                    }
+                }
+                ParsingState::Body(_) => self.state = ParsingState::Complete,
+                ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
+            }
+        }
+    }
+}
+/* HELPER FUNCTIONS */
+// \r\n finder
+fn find_crlf(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(2).position(|window| window == b"\r\n")
+}
+
+fn extract_and_parse_header_line(
+    buffer: &mut Vec<u8>,
+) -> std::result::Result<Option<(String, String)>, &'static str> {
+    if let Some(crlf_pos) = find_crlf(buffer) {
+        //end of header
+        if crlf_pos == 0 {
+            buffer.drain(..2);
+            return Ok(None);
+        }
+
+        let line_bytes = buffer.drain(..crlf_pos + 2).collect();
+        let line = match String::from_utf8(line_bytes) {
+            Ok(line) => line.trim_end_matches("\r\n").to_string(),
+            Err(_) => return Err("invalid utf-8 in request line"),
+        };
+
+        if let Some(ddot_pos) = line.find(":") {
+            let key = line[..ddot_pos].trim().to_string();
+            let value = line[ddot_pos + 1..].trim().to_string();
+
+            return Ok(Some((key, value)));
+        } else {
+            return Err("Malformed header");
+        }
+    } else {
+        Ok(Some(("Incomplete".to_string(), "".to_string())))
+    }
+}
+
+fn main() -> Result<()> {
+    let http = "\
+GET /hello.htm HTTP/1.1\r\n\
+Host: www.tutorialspoint.com\r\n\
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36\r\n\
+Accept-Language: en-us\r\n\
+Connection: Keep-Alive\r\n\
+Content-Leng
+";
+
+    let http2 = "POST /cgi-bin/process.cgi HTTP/1.1
+Host: www.tutorialspoint.com
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 45
+
+licenseID=string&content=string&paramsXML=string";
+
+    let mut httpRequest = HttpRequest::new();
+    let c = http.as_bytes();
+    println!("{c:?}");
+    httpRequest.buffer.extend_from_slice(c);
+    httpRequest.parse()?;
+
+    Ok(())
+}

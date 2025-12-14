@@ -1,0 +1,2 @@
+case insensitive header
+max header size
