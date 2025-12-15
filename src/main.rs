@@ -1,8 +1,7 @@
-use std::{
-    collections::HashMap, io, net::{TcpListener, TcpStream}, task::Poll
-};
 
-use mio::{Poll, Token};
+use std::{collections::HashMap, io};
+
+use mio::{Poll, Token, net::{TcpListener, TcpStream}};
 use server::error::Result;
 
 const LISTENER_TOKEN: Token = Token(0);
@@ -36,7 +35,7 @@ pub struct Server {
 impl Server {
     pub fn new(addr: &str) -> io::Result<Server> {
         let listener = TcpListener::bind(addr.parse().unwrap())?;
-        let poll = Poll::new();
+        let poll = Poll::new()?;
 
         Ok(Server { listener, poll, connections: HashMap::new(), next_token: TOKEN_START })
 
@@ -44,5 +43,6 @@ impl Server {
 }
 
 fn main() -> Result<()> {
+
     Ok(())
 }
