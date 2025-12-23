@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use server::error::Result;
-
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
     RequestLine,
@@ -17,7 +15,7 @@ pub struct HttpRequest {
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
-    buffer: Vec<u8>,
+    pub buffer: Vec<u8>,
 }
 
 impl HttpRequest {
@@ -36,8 +34,9 @@ impl HttpRequest {
         self.buffer.extend_from_slice(data);
     }
 
-    pub fn parse_request_line(&mut self) -> std::result::Result<(), &'static str> {
+    pub fn parse_request_line(&mut self) -> Result<(), &'static str> {
         if let Some(crlf_pos) = find_crlf(&self.buffer) {
+            println!("parse_request_line");
             let line_bytes = self.buffer.drain(..crlf_pos + 2).collect();
             let line = match String::from_utf8(line_bytes) {
                 Ok(line) => line.trim_end_matches("\r\n").to_string(),
@@ -65,11 +64,13 @@ impl HttpRequest {
 
             Ok(())
         } else {
+            println!("notfound crlf");
+
             Err("Incomplete request line")
         }
     }
 
-    fn parse_headers(&mut self) -> std::result::Result<(), &'static str> {
+    fn parse_headers(&mut self) -> Result<(), &'static str> {
         loop {
             // 8Kb max header size
             if self.buffer.len() > 8 * 1024 {
@@ -104,7 +105,7 @@ impl HttpRequest {
         }
     }
 
-    pub fn parse(&mut self) -> std::result::Result<&ParsingState, &'static str> {
+    pub fn parse(&mut self) -> Result<&ParsingState, &'static str> {
         loop {
             match self.state {
                 ParsingState::RequestLine => {
@@ -136,12 +137,13 @@ impl HttpRequest {
 /* HELPER FUNCTIONS */
 // \r\n finder
 fn find_crlf(buffer: &[u8]) -> Option<usize> {
+    println!("searching for crlf");
     buffer.windows(2).position(|window| window == b"\r\n")
 }
 
 fn extract_and_parse_header_line(
     buffer: &mut Vec<u8>,
-) -> std::result::Result<Option<(String, String)>, &'static str> {
+) -> Result<Option<(String, String)>, &'static str> {
     if let Some(crlf_pos) = find_crlf(buffer) {
         //end of header
         if crlf_pos == 0 {
@@ -168,28 +170,28 @@ fn extract_and_parse_header_line(
     }
 }
 
-fn main() -> Result<()> {
-    let http = "\
-GET /hello.htm HTTP/1.1\r\n\
-Host: www.tutorialspoint.com\r\n\
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36\r\n\
-Accept-Language: en-us\r\n\
-Connection: Keep-Alive\r\n\
-Content-Leng
-";
+// fn main() -> Result<()> {
+//     let http = "\
+// GET /hello.htm HTTP/1.1\r\n\
+// Host: www.tutorialspoint.com\r\n\
+// User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36\r\n\
+// Accept-Language: en-us\r\n\
+// Connection: Keep-Alive\r\n\
+// Content-Leng
+// ";
 
-    let http2 = "POST /cgi-bin/process.cgi HTTP/1.1
-Host: www.tutorialspoint.com
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 45
+//     let http2 = "POST /cgi-bin/process.cgi HTTP/1.1
+// Host: www.tutorialspoint.com
+// Content-Type: application/x-www-form-urlencoded
+// Content-Length: 45
 
-licenseID=string&content=string&paramsXML=string";
+// licenseID=string&content=string&paramsXML=string";
 
-    let mut httpRequest = HttpRequest::new();
-    let c = http.as_bytes();
-    println!("{c:?}");
-    httpRequest.buffer.extend_from_slice(c);
-    httpRequest.parse()?;
+//     let mut httpRequest = HttpRequest::new();
+//     let c = http.as_bytes();
+//     println!("{c:?}");
+//     httpRequest.buffer.extend_from_slice(c);
+//     httpRequest.parse()?;
 
-    Ok(())
-}
+//     Ok(())
+// }
