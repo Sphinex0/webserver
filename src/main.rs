@@ -131,6 +131,7 @@ impl Server {
                                 //     b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, World!",
                                 // );
                                 // conn.request.buffer.clear();
+                                conn.request = HttpRequest::new();
                                 self.poll.registry().reregister(
                                     &mut conn.stream,
                                     token,
