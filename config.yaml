@@ -1,0 +1,30 @@
+server:
+  host: 127.0.0.1
+  listen: 8080
+  listen: 9000
+  server_name: main_server.com
+  default_server: true
+  client_max_body_size: 1048576  # 1MB
+  
+  error_page: 404 /errors/404.html
+  error_page: 500 /errors/500.html
+
+  location: /
+    methods: GET POST
+    root: ./www/html
+    index: index.html
+    autoindex: false
+
+  location: /images/
+    methods: GET
+    root: ./www/data
+    autoindex: true
+
+  location: /old-path/
+    redirection: http://main_server.com/new-path/
+
+  location: /cgi-bin/
+    methods: GET POST
+    root: ./www/cgi
+    cgi_ext: .py
+

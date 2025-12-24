@@ -1,2 +1,14 @@
 case insensitive header
 max header size
+
+server:
+  host: 127.0.0.1
+  listen: 8080
+  server_name: secondary.com
+  client_max_body_size: 5242880  # 5MB
+  
+  location: /
+    methods: GET
+    root: ./www/secondary
+    index: second.html
+    autoindex: true

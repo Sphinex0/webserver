@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use core::fmt;
+use std::{collections::HashMap, fmt::Display};
 
 #[derive(Debug, PartialEq)]
 pub enum ParsingState {
@@ -36,7 +37,7 @@ impl HttpRequest {
 
     pub fn parse_request_line(&mut self) -> Result<(), &'static str> {
         if let Some(crlf_pos) = find_crlf(&self.buffer) {
-            println!("parse_request_line");
+            // println!("parse_request_line");
             let line_bytes = self.buffer.drain(..crlf_pos + 2).collect();
             let line = match String::from_utf8(line_bytes) {
                 Ok(line) => line.trim_end_matches("\r\n").to_string(),
@@ -55,17 +56,16 @@ impl HttpRequest {
             if version != "HTTP/1.1" {
                 return Err("http version not supported use HTTP/1.1");
             }
-            println!(
-                "parsed request line: {} {} {}",
-                self.methode, self.path, version
-            );
+            // println!(
+            //     "parsed request line: {} {} {}",
+            //     self.methode, self.path, version
+            // );
 
             self.state = ParsingState::Headers;
 
             Ok(())
         } else {
             println!("notfound crlf");
-
             Err("Incomplete request line")
         }
     }
@@ -84,7 +84,7 @@ impl HttpRequest {
                         return Err("Incomplete");
                     }
 
-                    println!("Parsed header: {key}: {value}");
+                    // println!("Parsed header: {key}: {value}");
                     self.headers.insert(key, value);
                 }
                 None => {
@@ -137,7 +137,6 @@ impl HttpRequest {
 /* HELPER FUNCTIONS */
 // \r\n finder
 fn find_crlf(buffer: &[u8]) -> Option<usize> {
-    println!("searching for crlf");
     buffer.windows(2).position(|window| window == b"\r\n")
 }
 
@@ -195,3 +194,29 @@ fn extract_and_parse_header_line(
 
 //     Ok(())
 // }
+impl Display for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "--- HTTP Request ---")?;
+        // 1. Request Line: GET /path HTTP/1.1
+        writeln!(f, "{:?} {} HTTP/1.1", self.methode, self.path)?;
+
+        // 2. Headers: Key: Value
+        writeln!(f, "Headers:")?;
+        for (key, value) in &self.headers {
+            writeln!(f, "  {}: {}", key, value)?;
+        }
+
+        // 3. Body Summary
+        // We only print the body if it's UTF-8; otherwise, we show the byte count.
+        if !self.body.is_empty() {
+            writeln!(f, "Body ({} bytes):", self.body.len())?;
+            match String::from_utf8(self.body.clone()) {
+                Ok(s) => writeln!(f, "  {}", s)?,
+                Err(_) => writeln!(f, "  <binary data>")?,
+            }
+        } else {
+            writeln!(f, "Body: <empty>")?;
+        }
+        writeln!(f, "--------------------")
+    }
+}
