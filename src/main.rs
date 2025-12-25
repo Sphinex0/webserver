@@ -130,7 +130,8 @@ impl Server {
         };
 
         if event.is_readable() {
-            let mut stack_buf = [0u8; 4096];
+            dbg!(1);
+            let mut stack_buf = [0u8; 10];
             loop {
                 match conn.stream.read(&mut stack_buf) {
                     Ok(0) => {
@@ -138,25 +139,27 @@ impl Server {
                         break;
                     }
                     Ok(n) => {
+                        dbg!(&n);
                         conn.request.append_data(&stack_buf[..n]);
                         match conn.request.parse() {
-                            Ok(ParsingState::Headers) => {
-                                // NEW: Validate body size using the injected config
-                                let body_size = conn
-                                    .request
-                                    .headers
-                                    .get("content-length")
-                                    .unwrap()
-                                    .parse::<usize>()
-                                    .unwrap();
-                                if body_size > conn.config.client_max_body_size {
-                                    Self::queue_error(conn, self.poll.registry(), token, 413);
-                                    break;
-                                }
-                            }
+                            // Ok(ParsingState::Headers) => {
+                            //     let body_size = conn
+                            //         .request
+                            //         .headers
+                            //         .get("content-length")
+                            //         .unwrap()
+                            //         .parse::<usize>()
+                            //         .unwrap();
+                            //     if body_size > conn.config.client_max_body_size {
+                            //         Self::queue_error(conn, self.poll.registry(), token, 413);
+                            //         break;
+                            //     }
+                            // }
                             Ok(ParsingState::Complete) => {
                                 // NEW: Route the request using the injected config
                                 Self::process_request(conn, self.poll.registry(), token)?;
+                                conn.request.clear();
+
                                 break;
                             }
                             _ => {}
@@ -178,6 +181,17 @@ impl Server {
                     self.poll
                         .registry()
                         .reregister(&mut conn.stream, token, Interest::READABLE)?;
+                }
+
+                if !conn.request.buffer.is_empty() {
+                    match conn.request.parse() {
+                        Ok(ParsingState::Complete) => {
+                            // NEW: Route the request using the injected config
+                            Self::process_request(conn, self.poll.registry(), token)?;
+                            conn.request.clear();
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -256,8 +270,13 @@ impl Server {
 
         // 3. Simple GET implementation (Static Files)
         if method == "GET" {
-            let full_path = format!("{}{}", route.root, path);
-            match std::fs::read(full_path) {
+            let full_path;
+            if !route.default_file.is_empty() && path == "/" {
+                full_path = format!("{}/{}", route.root, route.default_file);
+            } else {
+                full_path = format!("{}{}", route.root, path);
+            }
+            match std::fs::read(&full_path) {
                 Ok(content) => {
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
@@ -266,7 +285,7 @@ impl Server {
                     conn.write_buffer.extend_from_slice(response.as_bytes());
                     conn.write_buffer.extend_from_slice(&content);
                 }
-                Err(_) => {
+                Err(err) => {
                     Self::queue_error(conn, registry, token, 404);
                 }
             }

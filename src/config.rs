@@ -2,30 +2,29 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
-    pub methods: Vec<String>,      
+    pub methods: Vec<String>,
     pub redirection: Option<String>,
-    pub root: String,           
-    pub default_file: String,    
+    pub root: String,
+    pub default_file: String,
     pub cgi_ext: Option<String>,
-    pub autoindex: bool,        
+    pub autoindex: bool,
     pub client_max_body_size: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub host: String,
-    pub ports: Vec<u16>,           
+    pub ports: Vec<u16>,
     pub server_names: Vec<String>,
-    pub default_server: bool,      
-    pub error_pages: HashMap<u16, String>, 
+    pub default_server: bool,
+    pub error_pages: HashMap<u16, String>,
     pub client_max_body_size: usize,
     pub routes: HashMap<String, RouteConfig>,
 }
 
 impl ServerConfig {
-pub fn find_route(&self, path: &str) -> Option<&RouteConfig> {
+    pub fn find_route(&self, path: &str) -> Option<&RouteConfig> {
         let mut best_match: Option<(&String, &RouteConfig)> = None;
-
         for (prefix, route) in &self.routes {
             if path.starts_with(prefix) {
                 match best_match {
@@ -42,7 +41,6 @@ pub fn find_route(&self, path: &str) -> Option<&RouteConfig> {
     }
 }
 
-
 pub struct ConfigParser {
     lines: std::iter::Peekable<std::vec::IntoIter<String>>,
 }
@@ -50,7 +48,9 @@ pub struct ConfigParser {
 impl ConfigParser {
     pub fn new(content: String) -> Self {
         let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-        Self { lines: lines.into_iter().peekable() }
+        Self {
+            lines: lines.into_iter().peekable(),
+        }
     }
 
     pub fn parse(&mut self) -> Vec<ServerConfig> {
@@ -77,29 +77,37 @@ impl ConfigParser {
 
         while let Some(line) = self.lines.peek() {
             let indent = line.len() - line.trim_start().len();
-            if indent == 0 && !line.trim().is_empty() { break; } // End of server block
-            
+            if indent == 0 && !line.trim().is_empty() {
+                break;
+            } // End of server block
+
             let line = self.lines.next().unwrap();
             let parts: Vec<&str> = line.splitn(2, ':').collect();
-            if parts.len() < 2 { continue; }
-            
+            if parts.len() < 2 {
+                continue;
+            }
+
             let key = parts[0].trim();
             let val = parts[1].trim();
 
             match key {
                 "listen" => config.ports.push(val.parse().unwrap()),
                 "host" => config.host = val.to_string(),
-                "server_name" => config.server_names = val.split_whitespace().map(|s| s.to_string()).collect(),
+                "server_name" => {
+                    config.server_names = val.split_whitespace().map(|s| s.to_string()).collect()
+                }
                 "error_page" => {
                     let err_parts: Vec<&str> = val.split_whitespace().collect();
                     if err_parts.len() == 2 {
-                        config.error_pages.insert(err_parts[0].parse().unwrap(), err_parts[1].to_string());
+                        config
+                            .error_pages
+                            .insert(err_parts[0].parse().unwrap(), err_parts[1].to_string());
                     }
-                },
+                }
                 "location" => {
                     let path = val.to_string();
                     config.routes.insert(path, self.parse_route());
-                },
+                }
                 _ => {}
             }
         }
@@ -118,10 +126,37 @@ impl ConfigParser {
         };
         // Similar logic to parse_server, but for route-specific keys (methods, root, etc.)
         // We look for deeper indentation here.
+
+        while let Some(line) = self.lines.peek() {
+            let indent = line.len() - line.trim_start().len();
+            if line.trim().is_empty() {
+                break;
+            } // End of location block
+
+            let line = self.lines.next().unwrap();
+            let parts: Vec<&str> = line.splitn(2, ':').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let key = parts[0].trim();
+            let val = parts[1].trim();
+
+            match key {
+                "methods" => route
+                    .methods
+                    .extend(val.trim().split(" ").map(|s| s.to_owned())),
+                "root" => route.root = val.to_string(),
+                "default_file" => route.default_file = val.to_string(),
+                "autoindex" => route.autoindex = val.parse().unwrap(),
+                "cgi_ext" => route.cgi_ext = Some(val.to_string()),
+                "redirection" => route.redirection = Some(val.to_string()),
+                _ => {}
+            }
+        }
         route
     }
 }
-
 
 #[test]
 fn test_config_parsing() {

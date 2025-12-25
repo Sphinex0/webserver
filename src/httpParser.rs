@@ -31,6 +31,12 @@ impl HttpRequest {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.state = ParsingState::RequestLine;
+        self.headers.clear();
+        self.body.clear();
+    }
+
     pub fn append_data(&mut self, data: &[u8]) {
         self.buffer.extend_from_slice(data);
     }
@@ -127,6 +133,7 @@ impl HttpRequest {
                         self.state = ParsingState::Error;
                         return Err(err);
                     }
+                    
                 }
                 ParsingState::Body(_) => self.state = ParsingState::Complete,
                 ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
@@ -169,31 +176,6 @@ fn extract_and_parse_header_line(
     }
 }
 
-// fn main() -> Result<()> {
-//     let http = "\
-// GET /hello.htm HTTP/1.1\r\n\
-// Host: www.tutorialspoint.com\r\n\
-// User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36\r\n\
-// Accept-Language: en-us\r\n\
-// Connection: Keep-Alive\r\n\
-// Content-Leng
-// ";
-
-//     let http2 = "POST /cgi-bin/process.cgi HTTP/1.1
-// Host: www.tutorialspoint.com
-// Content-Type: application/x-www-form-urlencoded
-// Content-Length: 45
-
-// licenseID=string&content=string&paramsXML=string";
-
-//     let mut httpRequest = HttpRequest::new();
-//     let c = http.as_bytes();
-//     println!("{c:?}");
-//     httpRequest.buffer.extend_from_slice(c);
-//     httpRequest.parse()?;
-
-//     Ok(())
-// }
 impl Display for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "--- HTTP Request ---")?;
