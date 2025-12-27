@@ -12,7 +12,7 @@ pub enum ParsingState {
 
 pub struct HttpRequest {
     pub state: ParsingState,
-    pub methode: String,
+    pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
@@ -23,7 +23,7 @@ impl HttpRequest {
     pub fn new() -> Self {
         HttpRequest {
             state: ParsingState::RequestLine,
-            methode: String::new(),
+            method: String::new(),
             path: String::new(),
             headers: HashMap::new(),
             body: Vec::new(),
@@ -55,7 +55,7 @@ impl HttpRequest {
                 return Err("request line malformed");
             }
 
-            self.methode = parts[0].to_string();
+            self.method = parts[0].to_string();
             self.path = parts[1].to_string();
 
             let version = parts[2];
@@ -64,7 +64,7 @@ impl HttpRequest {
             }
             // println!(
             //     "parsed request line: {} {} {}",
-            //     self.methode, self.path, version
+            //     self.method, self.path, version
             // );
 
             self.state = ParsingState::Headers;
@@ -86,7 +86,7 @@ impl HttpRequest {
             match extract_and_parse_header_line(&mut self.buffer)? {
                 Some((key, value)) => {
                     if key == "Incomplete" {
-                        // return Ok(());
+                        // return Ok!(());
                         return Err("Incomplete");
                     }
 
@@ -144,7 +144,19 @@ impl HttpRequest {
 /* HELPER FUNCTIONS */
 // \r\n finder
 fn find_crlf(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(2).position(|window| window == b"\r\n")
+
+    let mut current_pos = 0;
+    while let Some(r_pos) = buffer[current_pos..].iter().position(|&b| b == b'\r') {
+        
+        let abs_r_pos_in_search = current_pos + r_pos;
+
+        if buffer.get(abs_r_pos_in_search + 1) == Some(&b'\n') {
+            // Return the absolute position in the original 'buffer'
+            return Some(abs_r_pos_in_search);
+        }
+        current_pos = abs_r_pos_in_search + 1;
+    }
+    None
 }
 
 fn extract_and_parse_header_line(
@@ -180,7 +192,7 @@ impl Display for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "--- HTTP Request ---")?;
         // 1. Request Line: GET /path HTTP/1.1
-        writeln!(f, "{:?} {} HTTP/1.1", self.methode, self.path)?;
+        writeln!(f, "{:?} {} HTTP/1.1", self.method, self.path)?;
 
         // 2. Headers: Key: Value
         writeln!(f, "Headers:")?;

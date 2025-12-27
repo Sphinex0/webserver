@@ -15,7 +15,7 @@ pub struct RouteConfig {
 pub struct ServerConfig {
     pub host: String,
     pub ports: Vec<u16>,
-    pub server_names: Vec<String>,
+    pub server_name: String,
     pub default_server: bool,
     pub error_pages: HashMap<u16, String>,
     pub client_max_body_size: usize,
@@ -68,7 +68,7 @@ impl ConfigParser {
         let mut config = ServerConfig {
             host: String::from("127.0.0.1"),
             ports: Vec::new(),
-            server_names: Vec::new(),
+            server_name: String::new(),
             default_server: false,
             error_pages: HashMap::new(),
             client_max_body_size: 1024 * 1024, // 1MB
@@ -93,9 +93,7 @@ impl ConfigParser {
             match key {
                 "listen" => config.ports.push(val.parse().unwrap()),
                 "host" => config.host = val.to_string(),
-                "server_name" => {
-                    config.server_names = val.split_whitespace().map(|s| s.to_string()).collect()
-                }
+                "server_name" => config.server_name = val.to_string(),
                 "error_page" => {
                     let err_parts: Vec<&str> = val.split_whitespace().collect();
                     if err_parts.len() == 2 {
@@ -128,7 +126,7 @@ impl ConfigParser {
         // We look for deeper indentation here.
 
         while let Some(line) = self.lines.peek() {
-            let indent = line.len() - line.trim_start().len();
+            let _indent = line.len() - line.trim_start().len();
             if line.trim().is_empty() {
                 break;
             } // End of location block
@@ -167,5 +165,69 @@ fn test_config_parsing() {
     assert_eq!(configs.len(), 2);
     assert!(configs[0].ports.contains(&8080));
     assert!(configs[0].ports.contains(&9000));
-    assert_eq!(configs[1].server_names[0], "secondary.com");
+    assert_eq!(configs[1].server_name, "secondary.com");
+}
+
+
+
+pub fn display_config(configs: &Vec<ServerConfig>) {
+    // Clear screen (optional, but professional)
+    // print!("\x1b[2J\x1b[1;1H");
+
+    println!("\n\x1b[1;35m 🌐 01_server CONFIGURATION DASHBOARD\x1b[0m");
+    println!("\x1b[38;5;240m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+
+    for (i, server) in configs.iter().enumerate() {
+        let server_label = format!("SERVER BLOCK {:02}", i + 1);
+        println!("\n  \x1b[1;37m{}\x1b[0m", server_label);
+        println!("  \x1b[38;5;244m─────────────────────────────────────────\x1b[0m");
+
+        // Info Grid
+        println!(
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m    \x1b[32m{}\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m",
+            server.host, server.ports
+        );
+        println!(
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentitie:\x1b[0m  \x1b[36m{}\x1b[0m",
+            server.server_name
+        );
+        println!(
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mLimits:\x1b[0m     \x1b[33m{} bytes\x1b[0m \x1b[38;5;244m(Max Body)\x1b[0m",
+            server.client_max_body_size
+        );
+
+        println!("\n  \x1b[1;37mRouting Table:\x1b[0m");
+
+        // Collect routes and sort them for a stable display
+        let mut sorted_routes: Vec<_> = server.routes.iter().collect();
+        sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (idx, (path, route)) in sorted_routes.iter().enumerate() {
+            let is_last = idx == sorted_routes.len() - 1;
+            let branch = if is_last {
+                "  └──"
+            } else {
+                "  ├──"
+            };
+            let methods_fmt = route.methods.join("|");
+
+            // Using ANSI background for methods makes them pop
+            println!(
+                "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{:12}\x1b[0m \x1b[48;5;236m\x1b[38;5;250m {} \x1b[0m ➔ \x1b[38;5;244mroot:\x1b[0m \x1b[3m{}\x1b[0m",
+                branch, path, methods_fmt, route.root
+            );
+
+            if let Some(cgi) = &route.cgi_ext {
+                let cgi_branch = if is_last { "     " } else { "  │  " };
+                println!(
+                    "  \x1b[38;5;244m{}  └─ \x1b[0m\x1b[38;5;208mCGI Enabled: {}\x1b[0m",
+                    cgi_branch, cgi
+                );
+            }
+        }
+    }
+    println!(
+        "\n\x1b[38;5;240m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+    );
+    println!(" \x1b[1;32m✔\x1b[0m Server initialized and ready for events.\n");
 }
