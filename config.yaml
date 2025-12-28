@@ -1,23 +1,28 @@
 servers:
-
- - "host": 127.0.0.1
-
- # New bracket syntax supported!
-
-   routes:
-
-        - path: /
-
-          methods: ["GET"      ,   POST]
-
-          root: ./html
-
-        - path: /dddddddd
-
-          methods: ["GET"]
-          root: ./html
-                  
+ - host: 127.0.0.2
    ports: [
-    8081
-   ]
-
+    8080, 
+    8081, 
+    9000,
+    ]
+   routes:
+    - path: /
+      methods: ["GET",   POST]
+      root: ./html
+    - path: /post
+      methods: [POST]
+      root: ./html
+ - host: 127.0.0.3
+   ports: 
+    - 4444
+    - 2222
+ - host: 127.0.0.4
+   ports: [3000]
+   server_name: myproxy.local
+   routes:
+        # Standard static file routing
+        - path: "/"
+          methods: ["GET", "POST"]
+          root: "./public"
+          default_file: "index.html"
+          autoindex: true
