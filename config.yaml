@@ -1,41 +1,23 @@
-server:
-  host: 127.0.0.2
-  listen: 8080
-  listen: 9000
-  server_name: main_server.com
-  default_server: true
-  client_max_body_size: 1048576  # 1MB
-  
-  error_page: 404 errors/404.html
-  error_page: 500 errors/500.html
+servers:
 
-  location: /
-    methods: GET POST
-    root: ./www/html
-    default_file: index.html
-    autoindex: false
+ - "host": 127.0.0.1
 
-  location: /images/
-    methods: GET
-    root: ./www/data
-    autoindex: true
+ # New bracket syntax supported!
 
-  location: /old-path/
-    redirection: http://main_server.com/new-path/
+   routes:
 
-  location: /cgi-bin/
-    methods: GET POST
-    root: ./www/cgi
-    cgi_ext: .py
+        - path: /
 
-server:
-  host: 127.0.0.1
-  listen: 8080
-  server_name: secondary.com
-  client_max_body_size: 5242880  # 5MB
-  
-  location: /
-    methods: GET
-    root: ./www/secondary
-    default_file: second.html
-    autoindex: true
+          methods: ["GET"      ,   POST]
+
+          root: ./html
+
+        - path: /dddddddd
+
+          methods: ["GET"]
+          root: ./html
+                  
+   ports: [
+    8081
+   ]
+

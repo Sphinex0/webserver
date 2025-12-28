@@ -1,20 +1,27 @@
-use std::io;
+use std::{io, iter::Peekable};
 
-use server::{
-    config::{ConfigParser, display_config}, lexer::{Tokenizer, tokens::Token}, server::Server
-};
+use server::{config::{ConfigParser, display_config}, lexer::Lexer};
 
 fn main() -> io::Result<()> {
     // 1. Read and Parse Config
     let config_path = "config.yaml";
     let raw_config = std::fs::read_to_string(config_path).expect("Failed to read config file");
-    let tokenizer = Tokenizer::new(&raw_config);
-    // while let Some(token) = tokenizer.next_token() {
-    //     if token == Token::EOF {
-    //         break;
-    //     }
-    //     dbg!(token);
-    // }
+    let mut tokenizer = Lexer::new(&raw_config);
+    // let tokens = tokenizer.tokenize();
+    match tokenizer.tokenize() {
+        Ok(tokens)=>{
+            dbg!(&tokens);
+            let config_parser = ConfigParser::new(tokens).parse().unwrap() ;
+            // dbg!(config_parser);
+            display_config(&config_parser)
+        }
+        Err(err)=> println!("{err}")
+    }
+
+    // dbg!(tokens);
+    
+
+
     // Assume ConfigParser returns Vec<ServerConfig>
     // let mut parser = ConfigParser::new(raw_config);
     // let configs = parser.parse();
@@ -28,5 +35,3 @@ fn main() -> io::Result<()> {
     // server.run()
     Ok(())
 }
-
-
