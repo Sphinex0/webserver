@@ -164,7 +164,7 @@ impl ConfigParser {
                     }
                 }
                 "server_name" => config.server_name = self.parse_string()?,
-
+                "error_pages" => config.error_pages = self.parse_error_pages()?,
                 _ => {
                     // Consume unknown scalar value to prevent crash
                     if let Some(t) = self.tokens.peek() {
@@ -180,6 +180,52 @@ impl ConfigParser {
         }
 
         Ok(config)
+    }
+
+    // --- NEW: Parse Error Pages Map ---
+    fn parse_error_pages(&mut self) -> Result<HashMap<u16, String>, String> {
+        let mut pages = HashMap::new();
+        
+        // 1. Establish Baseline Indentation
+        self.skip_newlines_only();
+        let mut map_indent = 0;
+        if let Some(TokenType::Indent(n)) = self.peek_kind() {
+            map_indent = *n;
+        }
+
+        loop {
+            self.skip_newlines_only();
+
+            // 2. Check Indentation Depth
+            if let Some(TokenType::Indent(n)) = self.peek_kind() {
+                if *n < map_indent {
+                    // Indent dropped (back to server level). STOP.
+                    break;
+                }
+                self.tokens.next(); // Consume valid indent
+            } else if map_indent > 0 {
+                // If we expect indent but found none (e.g. next line is "host:"), break.
+                break;
+            }
+
+            // 3. Parse Key (Error Code)
+            // We expect a Number (e.g., 404)
+            let error_code = match self.peek_kind() {
+                Some(TokenType::Number(n)) => *n as u16,
+                _ => break, // Not a number? Stop.
+            };
+            self.tokens.next(); // Consume the number
+
+            // 4. Consume Separator
+            self.consume(TokenType::Colon)?;
+
+            // 5. Parse Value (File Path)
+            let path = self.parse_string()?;
+            
+            pages.insert(error_code, path);
+        }
+        
+        Ok(pages)
     }
 
     fn parse_route_list(&mut self) -> Result<Vec<RouteConfig>, String> {
@@ -262,7 +308,7 @@ impl ConfigParser {
 
             // CHECK if this key belongs to a Route
             match key_str.as_str() {
-                "path" | "root" | "methods" | "autoindex" | "cgi_extension" | "default_file" => {
+                "path" | "root" | "methods" | "autoindex" | "cgi_ext" | "default_file" | "redirection" => {
                     self.tokens.next(); // Consume key
                     self.consume(TokenType::Colon)?;
 
@@ -275,6 +321,9 @@ impl ConfigParser {
                             let val = self.parse_string()?;
                             route.autoindex = val == "true" || val == "on";
                         }
+                        "cgi_ext" => route.cgi_ext = Some(self.parse_string()?),
+                        "redirection" => route.redirection = Some(self.parse_string()?),
+
                         // Handle other fields...
                         _ => {}
                     }
@@ -438,63 +487,99 @@ fn test_config_parsing() {
 }
 
 pub fn display_config(configs: &Vec<ServerConfig>) {
-    // Clear screen (optional, but professional)
-    // print!("\x1b[2J\x1b[1;1H");
-
-    println!("\n\x1b[1;35m 🌐 01_server CONFIGURATION DASHBOARD\x1b[0m");
-    println!("\x1b[38;5;240m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    println!("\n\x1b[1;35m 🌐 SERVER CONFIGURATION DASHBOARD\x1b[0m");
+    println!("\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m");
 
     for (i, server) in configs.iter().enumerate() {
         let server_label = format!("SERVER BLOCK {:02}", i + 1);
         println!("\n  \x1b[1;37m{}\x1b[0m", server_label);
-        println!("  \x1b[38;5;244m─────────────────────────────────────────\x1b[0m");
+        println!("  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m");
 
-        // Info Grid
+        // Server Info Grid
         println!(
-            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m    \x1b[32m{}\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m",
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m     \x1b[32m{}\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m",
             server.host, server.ports
         );
         println!(
-            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentitie:\x1b[0m  \x1b[36m{}\x1b[0m",
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentity:\x1b[0m    \x1b[36m{}\x1b[0m",
             server.server_name
         );
         println!(
-            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mLimits:\x1b[0m     \x1b[33m{} bytes\x1b[0m \x1b[38;5;244m(Max Body)\x1b[0m",
-            server.client_max_body_size
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mDefault:\x1b[0m     \x1b[{}m{}\x1b[0m",
+            if server.default_server { "32" } else { "31" }, 
+            if server.default_server { "YES" } else { "NO" }
+        );
+        println!(
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mBody Limit:\x1b[0m  \x1b[33m{} KB\x1b[0m",
+            server.client_max_body_size / 1024
         );
 
-        println!("\n  \x1b[1;37mRouting Table:\x1b[0m");
+        // Error Pages
+        if !server.error_pages.is_empty() {
+            println!("  \x1b[1;34m⦿\x1b[0m \x1b[1;37mError Pages:\x1b[0m");
+            for (code, path) in &server.error_pages {
+                println!("    \x1b[38;5;244m{:4}\x1b[0m → \x1b[31m{}\x1b[0m", code, path);
+            }
+        }
 
-        // Collect routes and sort them for a stable display
+        // Routes Section
+        println!("\n  \x1b[1;37m📋 ROUTING TABLE ({}) \x1b[0m", server.routes.len());
+        println!("  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m");
+
         let mut sorted_routes: Vec<_> = server.routes.iter().collect();
         sorted_routes.sort_by(|a, b| a.0.cmp(b.0));
 
         for (idx, (path, route)) in sorted_routes.iter().enumerate() {
             let is_last = idx == sorted_routes.len() - 1;
-            let branch = if is_last {
-                "  └──"
-            } else {
-                "  ├──"
-            };
-            let methods_fmt = route.methods.join("|");
+            let branch = if is_last { "  └──" } else { "  ├──" };
+            let methods_fmt = route.methods.join(" | ");
+            let route_limit = format!("{} KB", route.client_max_body_size / 1024);
 
-            // Using ANSI background for methods makes them pop
             println!(
-                "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{:12}\x1b[0m \x1b[48;5;236m\x1b[38;5;250m {} \x1b[0m ➔ \x1b[38;5;244mroot:\x1b[0m \x1b[3m{}\x1b[0m",
-                branch, path, methods_fmt, route.root
+                "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{}\x1b[0m",
+                branch, path
+            );
+            println!(
+                "  \x1b[38;5;250m    ├─ Methods:\x1b[0m \x1b[48;5;236m\x1b[38;5;250m {} \x1b[0m",
+                methods_fmt
+            );
+            println!(
+                "  \x1b[38;5;250m    ├─ Root:\x1b[0m    \x1b[32m{}\x1b[0m",
+                route.root
+            );
+            println!(
+                "  \x1b[38;5;250m    ├─ Default:\x1b[0m  \x1b[36m{}\x1b[0m",
+                route.default_file
+            );
+            println!(
+                "  \x1b[38;5;250m    ├─ Body Limit:\x1b[0m \x1b[33m{}\x1b[0m",
+                route_limit
+            );
+            println!(
+                "  \x1b[38;5;250m    ├─ Autoindex:\x1b[0m \x1b[{}m{}\x1b[0m",
+                if route.autoindex { "32" } else { "31" },
+                if route.autoindex { "ON" } else { "OFF" }
             );
 
+            if let Some(redir) = &route.redirection {
+                let indent = if is_last { "     " } else { "  │  " };
+                println!("  \x1b[38;5;250m{}├─ Redirect:\x1b[0m \x1b[35m{}\x1b[0m", indent, redir);
+            }
+
             if let Some(cgi) = &route.cgi_ext {
-                let cgi_branch = if is_last { "     " } else { "  │  " };
-                println!(
-                    "  \x1b[38;5;244m{}  └─ \x1b[0m\x1b[38;5;208mCGI Enabled: {}\x1b[0m",
-                    cgi_branch, cgi
-                );
+                let indent = if is_last { "     " } else { "  │  " };
+                println!("  \x1b[38;5;250m{}└─ CGI:\x1b[0m     \x1b[38;5;208m{}\x1b[0m", indent, cgi);
+            } else {
+                let indent = if is_last { "     " } else { "  │  " };
+                println!("  \x1b[38;5;250m{}└─ CGI:\x1b[0m      \x1b[31mDISABLED\x1b[0m", indent);
+            }
+            
+            if !is_last {
+                println!("  \x1b[38;5;244m    │\x1b[0m");
             }
         }
     }
-    println!(
-        "\n\x1b[38;5;240m ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
-    );
-    println!(" \x1b[1;32m✔\x1b[0m Server initialized and ready for events.\n");
+    
+    println!("\n\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m");
+    println!(" \x1b[1;32m✔\x1b[0m Configuration loaded successfully - Ready for requests!\n");
 }

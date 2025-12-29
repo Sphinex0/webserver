@@ -1,6 +1,6 @@
 use std::{io, iter::Peekable};
 
-use server::{config::{ConfigParser, display_config}, lexer::Lexer};
+use server::{config::{ConfigParser, display_config}, lexer::Lexer, server::Server};
 
 fn main() -> io::Result<()> {
     // 1. Read and Parse Config
@@ -10,10 +10,16 @@ fn main() -> io::Result<()> {
     // let tokens = tokenizer.tokenize();
     match tokenizer.tokenize() {
         Ok(tokens)=>{
-            dbg!(&tokens);
+            // dbg!(&tokens);
+            for token in &tokens {
+                println!("{token}");
+            }
             let config_parser = ConfigParser::new(tokens).parse().unwrap() ;
             // dbg!(config_parser);
-            display_config(&config_parser)
+            display_config(&config_parser);
+            let mut server = Server::new(config_parser)?;
+            server.run()?;
+
         }
         Err(err)=> println!("{err}")
     }
