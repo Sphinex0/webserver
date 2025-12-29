@@ -1,4 +1,4 @@
-use std::{io, iter::Peekable};
+use std::io;
 
 use server::{config::{ConfigParser, display_config}, lexer::Lexer, server::Server};
 
