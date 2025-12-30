@@ -84,11 +84,7 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                 };
                 match key_str.as_str() {
                     ARMS
-                    _ => {
-                    println!(\"\\x1b[1;33mWarning:\\x1b[0m Unknown field '{}' found in STRUCT configuration. Skipping it.\",key_str);
-                    parser.consume_key(key_str.as_str())?;
-                    continue;
-                    },
+                    _ => {break;},
                 }
             }
             Ok(obj)
