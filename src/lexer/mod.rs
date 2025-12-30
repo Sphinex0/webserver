@@ -31,20 +31,24 @@ impl<'a> Lexer<'a> {
         while let Some(&c) = self.peek() {
             let loc = Loc { line: self.line, col: self.col };
 
-            // 1. Handle Indentation (Only at start of line)
-            if is_start_of_line && c.is_whitespace() && c != '\n' {
+            // 1. Handle Indentation at start of line
+            if is_start_of_line && c != '\n' {
                 let mut spaces = 0;
-                while let Some(&w) = self.peek() {
-                    if w == ' ' { spaces += 1; self.advance(); }
-                    else if w == '\t' { spaces += 4; self.advance(); } // Soft tab
-                    else { break; }
+                if c.is_whitespace() {
+                    while let Some(&w) = self.peek() {
+                        if w == ' ' { spaces += 1; self.advance(); }
+                        else if w == '\t' { spaces += 4; self.advance(); } // Soft tab
+                        else { break; }
+                    }
                 }
+                
                 // Emit indent only if relevant content follows
                 if let Some(&next) = self.peek() {
                     if next != '\n' && next != '#' {
                         tokens.push(Token { kind: TokenType::Indent(spaces), loc });
                     }
                 }
+                is_start_of_line = false;
                 continue;
             }
 

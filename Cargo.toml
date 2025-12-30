@@ -1,10 +1,12 @@
 [package]
 name = "server"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-mio = { version = "1.1.1", features = ["os-poll", "net"] }
+mio = { version = "1.0.3", features = ["os-poll", "net"] }
+derive_yaml = { path = "./derive_yaml" }
+
 
 
 # mio = { version = "1.1.1", features = ["os-poll", "net"] }
