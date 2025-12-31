@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, iter::Peekable};
+use std::{collections::HashMap, fmt};
 use derive_yaml::FromYaml;
 
 use crate::lexer::tokens::{Loc, Token, TokenType};
@@ -97,30 +97,91 @@ impl<T: FromYaml> FromYaml for Vec<T> {
         let mut items = Vec::new();
         parser.skip_newlines_only();
 
-        let mut list_indent = 0;
-        if let Some(TokenType::Indent(n)) = parser.peek_kind() {
-            list_indent = *n;
-            if list_indent < min_indent { return Ok(items); }
-        }
-
-        loop {
-            parser.skip_newlines_only();
+        if let Some(TokenType::LBracket) = parser.peek_kind() {
+            parser.consume(TokenType::LBracket)?;
+            loop {
+                while matches!(parser.peek_kind(), Some(TokenType::Newline) | Some(TokenType::Indent(_))) {
+                    parser.cursor += 1;
+                }
+                if let Some(TokenType::RBracket) = parser.peek_kind() {
+                    parser.consume(TokenType::RBracket)?;
+                    break;
+                }
+                items.push(T::from_yaml(parser, min_indent)?);
+                while matches!(parser.peek_kind(), Some(TokenType::Newline) | Some(TokenType::Indent(_))) {
+                    parser.cursor += 1;
+                }
+                if let Some(TokenType::Comma) = parser.peek_kind() {
+                    parser.consume(TokenType::Comma)?;
+                }
+            }
+        } else {
+            let mut list_indent = 0;
             if let Some(TokenType::Indent(n)) = parser.peek_kind() {
-                if *n < list_indent { break; }
-                parser.tokens.next();
-            } else if list_indent > 0 { break; }
+                list_indent = *n;
+                if list_indent < min_indent { return Ok(items); }
+            }
 
-            if let Some(TokenType::Dash) = parser.peek_kind() {
-                parser.consume(TokenType::Dash)?;
-                items.push(T::from_yaml(parser, list_indent).map_err(|mut e| {
-                    e.context.push(format!("at list index {}", items.len()));
-                    e
-                })?);
-            } else { break; }
+            loop {
+                parser.skip_newlines_only();
+                if let Some(TokenType::Indent(n)) = parser.peek_kind() {
+                    if *n < list_indent { break; }
+                    
+                    // STRICT CHECK:
+                    // If we see an indent greater than list_indent, it usually means 
+                    // it belongs to the previous item (e.g. multi-line string or nested object field),
+                    // NOT a new list item.
+                    // HOWEVER, we are looking for the next item which starts with a Dash.
+                    // If we see Indent(>n) then Dash, that's an indented list item which is mismatched.
+                    // If we see Indent(>n) then Key/Value, that's content of previous item.
+                    
+                    // But here, Vec<T> is iterating over items.
+                    // We expect the next token (after optional indent) to be Dash.
+                    // If indent > list_indent, we need to check if it's followed by Dash.
+                    // If yes -> Error (inconsistent indent).
+                    // If no -> It's probably part of previous item, but Vec<T> loop shouldn't be parsing inside item content?
+                    // actually T::from_yaml consumes the item. So when we are back here, we expect the NEXT item.
+                    // So any content here MUST start with a Dash at `list_indent`.
+                    
+                    if *n > list_indent {
+                         // Check if this is a start of a new item (Dash) or just debris
+                         if let Some(TokenType::Dash) = parser.peek_kind_at(1) {
+                             return Err(ConfigError {
+                                message: format!("Indentation mismatch in list: found {}, expected {}", *n, list_indent),
+                                loc: parser.peek_loc(),
+                                context: vec![],
+                             });
+                         }
+                         // If it's not a dash, it might be something else. 
+                         // But for now, let's strictly enforce list item start.
+                         // Actually, if T consumes everything properly, we should only see:
+                         // 1. Same indent + Dash (next item)
+                         // 2. Less indent (end of list)
+                         // 3. Same indent + something else (invalid list item start)
+                         
+                         // If we see greater indent here, it means T didn't consume everything, 
+                         // OR the file structure is broken.
+                         // Let's treat it as an error for strictness if it looks like a list item.
+                         // But simpler: just enforce equality if we see a dash.
+                    }
+                    
+                    parser.cursor += 1;
+                } else if list_indent > 0 { break; }
+
+                if let Some(TokenType::Dash) = parser.peek_kind() {
+                     // Double check: if we didn't have an indent token (list_indent=0), 
+                     // but min_indent > 0, that's handled by first check.
+                     // But if list_indent > 0, we must have consumed it above.
+                     // If we are here, we are ready to consume Dash.
+                    parser.consume(TokenType::Dash)?;
+                    items.push(T::from_yaml(parser, list_indent)?);
+                } else { break; }
+            }
         }
         Ok(items)
     }
 }
+
 
 impl<K, V>
     FromYaml for HashMap<K, V>
@@ -129,7 +190,6 @@ where
     V: FromYaml,
 {
     fn from_yaml(parser: &mut ConfigParser, _min_indent: usize) -> ParseResult<Self> {
-        println!("keeeey ----------------------------");
         let mut map = HashMap::new();
         parser.skip_newlines_only();
         
@@ -142,7 +202,7 @@ where
             parser.skip_newlines_only();
             if let Some(TokenType::Indent(n)) = parser.peek_kind() {
                 if *n < map_indent { break; }
-                parser.tokens.next();
+                parser.cursor += 1;
             } else if map_indent > 0 { break; }
 
             match parser.peek_kind() {
@@ -253,27 +313,47 @@ impl ServerConfig {
 // --- Config Parser ---
 
 pub struct ConfigParser {
-    pub tokens: Peekable<std::vec::IntoIter<Token>>,
+    pub tokens: Vec<Token>,
+    pub cursor: usize,
 }
 
 impl ConfigParser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self {
-            tokens: tokens.into_iter().peekable(),
+            tokens,
+            cursor: 0,
         }
     }
 
-    pub fn peek_kind(&mut self) -> Option<&TokenType> {
-        self.tokens.peek().map(|t| &t.kind)
+    pub fn peek_kind(&self) -> Option<&TokenType> {
+        self.tokens.get(self.cursor).map(|t| &t.kind)
     }
-    
-    pub fn peek_loc(&mut self) -> Option<Loc> {
-        self.tokens.peek().map(|t| t.loc)
+
+    pub fn peek_kind_at(&self, offset: usize) -> Option<&TokenType> {
+        self.tokens.get(self.cursor + offset).map(|t| &t.kind)
+    }
+
+    pub fn peek_token(&self) -> Option<&Token> {
+        self.tokens.get(self.cursor)
+    }
+
+    pub fn peek_loc(&self) -> Option<Loc> {
+        self.tokens.get(self.cursor).map(|t| t.loc)
+    }
+
+    pub fn next_token(&mut self) -> Option<&Token> {
+        if self.cursor < self.tokens.len() {
+            let t = &self.tokens[self.cursor];
+            self.cursor += 1;
+            Some(t)
+        } else {
+            None
+        }
     }
 
     pub fn consume(&mut self, expected: TokenType) -> ParseResult<()> {
         let loc = self.peek_loc();
-        match self.tokens.next() {
+        match self.next_token() {
             Some(t) if std::mem::discriminant(&t.kind) == std::mem::discriminant(&expected) => Ok(()),
             Some(t) => Err(ConfigError {
                 message: format!("Expected {:?}, found {:?}", expected, t.kind),
@@ -289,14 +369,14 @@ impl ConfigParser {
     }
 
     pub fn consume_key(&mut self, _key: &str) -> ParseResult<()> {
-        self.tokens.next(); // consume text
+        self.cursor += 1; // consume text
         self.consume(TokenType::Colon)
     }
 
     pub fn skip_newlines(&mut self) {
         while let Some(k) = self.peek_kind() {
             if matches!(k, TokenType::Newline | TokenType::Indent(_)) {
-                self.tokens.next();
+                self.cursor += 1;
             } else { break; }
         }
     }
@@ -304,7 +384,7 @@ impl ConfigParser {
     pub fn skip_newlines_only(&mut self) -> bool {
         let mut skipped = false;
         while let Some(TokenType::Newline) = self.peek_kind() {
-            self.tokens.next();
+            self.cursor += 1;
             skipped = true;
         }
         skipped
@@ -312,9 +392,9 @@ impl ConfigParser {
 
     pub fn parse_scalar_string(&mut self) -> ParseResult<String> {
         let loc = self.peek_loc();
-        match self.tokens.next() {
-            Some(t) => match t.kind {
-                TokenType::Text(s) | TokenType::StringLit(s) => Ok(s),
+        match self.next_token() {
+            Some(t) => match &t.kind {
+                TokenType::Text(s) | TokenType::StringLit(s) => Ok(s.clone()),
                 _ => Err(ConfigError {
                     message: format!("Expected string, found {:?}", t.kind),
                     loc: Some(t.loc),
@@ -331,7 +411,7 @@ impl ConfigParser {
 
     pub fn parse_scalar_number(&mut self) -> ParseResult<u64> {
         let loc = self.peek_loc();
-        match self.tokens.next() {
+        match self.next_token() {
             Some(t) => match t.kind {
                 TokenType::Number(n) => Ok(n),
                 _ => Err(ConfigError {
@@ -346,6 +426,56 @@ impl ConfigParser {
                 context: Vec::new(),
             }),
         }
+    }
+
+    pub fn skip_value(&mut self, min_indent: usize) -> ParseResult<()> {
+        loop {
+             if matches!(self.peek_kind(), Some(TokenType::Newline)) {
+                 break;
+             }
+             if self.peek_kind().is_none() {
+                 return Ok(());
+             }
+             self.cursor += 1;
+        }
+        
+        loop {
+            if matches!(self.peek_kind(), Some(TokenType::Newline)) {
+                self.cursor += 1; // Consume Newline
+                
+                let indent_val = if let Some(TokenType::Indent(n)) = self.peek_kind() {
+                    Some(*n)
+                } else {
+                    None
+                };
+                
+                if let Some(n) = indent_val {
+                    if n > min_indent {
+                        self.cursor += 1; // Consume Indent
+                        loop {
+                            if matches!(self.peek_kind(), Some(TokenType::Newline)) {
+                                break;
+                            }
+                             if self.peek_kind().is_none() {
+                                 return Ok(());
+                             }
+                            self.cursor += 1;
+                        }
+                    } else {
+                        return Ok(());
+                    }
+                } else {
+                    // check if another newline (empty line)
+                    if matches!(self.peek_kind(), Some(TokenType::Newline)) {
+                        continue;
+                    }
+                    return Ok(());
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -421,7 +551,6 @@ pub fn display_config(configs: &Vec<ServerConfig>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::Lexer;
 
     #[test]
     fn test_config_parsing() {

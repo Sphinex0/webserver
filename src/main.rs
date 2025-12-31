@@ -9,6 +9,7 @@ fn main() -> io::Result<()> {
     let config = Config::from_str(&raw_config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
+
     // 2. Display Configuration Summary
     display_config(&config.servers);
 

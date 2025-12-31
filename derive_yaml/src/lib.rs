@@ -1,4 +1,5 @@
-use proc_macro::{Delimiter, TokenStream, TokenTree};
+extern crate proc_macro;
+use proc_macro::{TokenStream, TokenTree, Delimiter};
 
 #[proc_macro_derive(FromYaml)]
 pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
@@ -26,11 +27,7 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                     match inner_token {
                         TokenTree::Ident(ident) => {
                             let s = ident.to_string();
-                            if s != "pub"
-                                && s != "ConfigParser"
-                                && s != "ParseResult"
-                                && s != "FromYaml"
-                            {
+                            if s != "pub" && s != "ConfigParser" && s != "ParseResult" && s != "FromYaml" {
                                 last_ident = s;
                             }
                         }
@@ -41,11 +38,9 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                                     last_ident.clear();
                                 }
                                 while let Some(skip_token) = group_iter.next() {
-                                    if let TokenTree::Punct(p) = &skip_token {
-                                        if p.as_char() == ',' {
-                                            break;
-                                        }
-                                    }
+                                     if let TokenTree::Punct(p) = &skip_token {
+                                         if p.as_char() == ',' { break; }
+                                     }
                                 }
                             }
                         }
@@ -57,39 +52,86 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
         }
     }
 
-    let q = char::from(34); // '"'
+    let q = char::from(34);
     let mut arms = String::new();
-    dbg!(&q);
     for field in fields {
-        let arm = format!("{0}{1}{0} => {{ parser.consume_key({0}{1}{0})?; obj.{1} = FromYaml::from_yaml(parser, min_indent)?; }},
-", q, field);
+        let arm = format!(
+            "{0}{1}{0} => {{ parser.consume_key({0}{1}{0})?; obj.{1} = FromYaml::from_yaml(parser, min_indent).map_err(|mut e| {{ e.context.push(format!({0}parsing field '{1}'{0})); e }})?; }},
+",
+            q, field
+        );
         arms.push_str(&arm);
     }
 
     let mut code = "impl FromYaml for STRUCT {
-        fn from_yaml(parser: &mut ConfigParser, min_indent: usize) -> ParseResult<Self> {
-            let mut obj = Self::default();
-            loop {
-                let has_newline = parser.skip_newlines_only();
-                if let Some(crate::lexer::tokens::TokenType::Indent(n)) = parser.peek_kind() {
-                    if *n < min_indent || (*n == min_indent && min_indent > 0) { break; }
-                    parser.tokens.next();
-                } else if has_newline && min_indent > 0 {
+    fn from_yaml(parser: &mut ConfigParser, min_indent: usize) -> ParseResult<Self> {
+        let mut obj = Self::default();
+        let mut struct_indent: Option<usize> = None;
+        loop {
+            parser.skip_newlines_only();
+            
+            if let Some(crate::lexer::tokens::TokenType::Indent(n)) = parser.peek_kind() {
+                let indent = *n;
+                if indent < min_indent { break; }
+                
+                // NEW: Check if this indentation is followed by a Dash (start of new list item)
+                // If so, we should NOT consume it here, but break so the list parser handles it.
+                // We peek 1 token ahead (after Indent).
+                if let Some(crate::lexer::tokens::TokenType::Dash) = parser.peek_kind_at(1) {
                     break;
                 }
-                if let Some(crate::lexer::tokens::TokenType::Dash) = parser.peek_kind() { break; }
-                let key_str = match parser.peek_kind() {
-                    Some(crate::lexer::tokens::TokenType::Text(s)) | Some(crate::lexer::tokens::TokenType::StringLit(s)) => s.clone(),
-                    _ => break,
-                };
-                match key_str.as_str() {
-                    ARMS
-                    _ => {break;},
+
+                if let Some(current) = struct_indent {
+                    if indent != current {
+                        if indent < current {
+                            if indent > min_indent {
+                                return Err(ConfigError {
+                                    message: format!(\"Indentation mismatch: found {} < current {} but > parent {}\", indent, current, min_indent),
+                                    loc: parser.peek_loc(),
+                                    context: vec![],
+                                });
+                            }
+                            break;
+                        } else {
+                             return Err(ConfigError {
+                                 message: format!(\"Indentation mismatch: found {} > current {}\", indent, current),
+                                 loc: parser.peek_loc(),
+                                 context: vec![],
+                             });
+                        }
+                    }
+                } else {
+                    if indent <= min_indent && min_indent > 0 { break; }
+                    struct_indent = Some(indent);
+                }
+                parser.cursor += 1; 
+            } else if min_indent > 0 {
+                if struct_indent.is_none() {
+                     if let Some(tok) = parser.peek_token() {
+                         // if tok.loc.col > 1 { struct_indent = Some(tok.loc.col - 1); }
+                     }
                 }
             }
-            Ok(obj)
+
+            if let Some(crate::lexer::tokens::TokenType::Dash) = parser.peek_kind() { break; }
+
+            let key_str = match parser.peek_kind() {
+                Some(crate::lexer::tokens::TokenType::Text(s)) | Some(crate::lexer::tokens::TokenType::StringLit(s)) => s.clone(),
+                _ => break,
+            };
+
+            match key_str.as_str() {
+                ARMS
+                _ => {
+                    eprintln!(\"Warning: Unknown field '{}'\", key_str);
+                    parser.consume_key(&key_str)?;
+                    parser.skip_value(struct_indent.unwrap_or(min_indent))?;
+                }
+            }
         }
-    }".to_string();
+        Ok(obj)
+    }
+}".to_string();
 
     code = code.replace("STRUCT", &struct_name);
     code = code.replace("ARMS", &arms);
