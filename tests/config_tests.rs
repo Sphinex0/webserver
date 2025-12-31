@@ -238,24 +238,79 @@ servers:
 }
 
 #[test]
-fn test_inconsistent_list_indentation_scenario() {
+fn test_separate_list_items_behavior() {
     let yaml = r#"
 servers:
-  - host: "server1"
-   - host: "server2"
-     ports: [80]
-  - host: "server3"
+  - host: "127.0.0.255"
+  - ports: [9999]
 "#;
-    // Hypothesis: Strict parsing should reject the inconsistent indentation (2 vs 3).
-    let result = Config::from_str(yaml);
+    let config = Config::from_str(yaml).expect("Should parse");
+    assert_eq!(config.servers.len(), 2);
     
-    match result {
-        Ok(_) => panic!("Should fail due to inconsistent indentation"),
-        Err(e) => {
-            println!("Correctly failed: {}", e);
-            assert!(e.message.contains("Indentation mismatch"));
-        }
-    }
+    // Server 1
+    assert_eq!(config.servers[0].host, "127.0.0.255");
+    assert_eq!(config.servers[0].ports, vec![8080]); // Default
+    
+    // Server 2
+    assert_eq!(config.servers[1].host, "127.0.0.1"); // Default
+    assert_eq!(config.servers[1].ports, vec![9999]);
+}
+
+#[test]
+fn test_scalar_where_list_expected() {
+    let yaml = r#"
+servers:
+  - ports: 9999
+"#;
+    // This now strictly fails because 9999 is not a list (doesn't start with '[' or '-')
+    let err = Config::from_str(yaml).unwrap_err();
+    assert!(err.message.contains("Expected list"));
+}
+
+#[test]
+fn test_root_level_dash_ignored() {
+    let yaml = r#"
+servers:
+  - host: "127.0.0.255"
+- ports: [9999]
+"#;
+    // The second dash is at indent 0. The 'servers' list is indent 2.
+    // So the list ends.
+    // The root parser sees a Dash. Since Config is a struct, it sees Dash as end-of-struct (or invalid).
+    // Our generated parser breaks on Dash.
+    // So 'ports' is ignored.
+    let config = Config::from_str(yaml).expect("Should parse partial config");
+    assert_eq!(config.servers.len(), 1);
+    assert_eq!(config.servers[0].host, "127.0.0.255");
+    // Verify ports didn't apply to server 1
+    assert_eq!(config.servers[0].ports, vec![8080]); 
+}
+
+#[test]
+fn test_ambiguous_list_indentation_struct_vs_list() {
+    let yaml = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: 
+  - 8888
+  - 6868
+    server_name: "localhost"
+"#;
+    // This should fail because '8888' is not a valid map key for ServerConfig.
+    let result = Config::from_str(yaml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_inline_dashed_item() {
+    let yaml = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: - 9999
+"#;
+    // Strict parsing now requires block list items to start on a new line.
+    let err = Config::from_str(yaml).unwrap_err();
+    assert!(err.message.contains("Block list item must start on a new line"));
 }
 
 #[test]

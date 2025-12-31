@@ -74,9 +74,6 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                 let indent = *n;
                 if indent < min_indent { break; }
                 
-                // NEW: Check if this indentation is followed by a Dash (start of new list item)
-                // If so, we should NOT consume it here, but break so the list parser handles it.
-                // We peek 1 token ahead (after Indent).
                 if let Some(crate::lexer::tokens::TokenType::Dash) = parser.peek_kind_at(1) {
                     break;
                 }
@@ -106,18 +103,39 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                 }
                 parser.cursor += 1; 
             } else if min_indent > 0 {
-                if struct_indent.is_none() {
-                     if let Some(tok) = parser.peek_token() {
-                         // if tok.loc.col > 1 { struct_indent = Some(tok.loc.col - 1); }
-                     }
+                if struct_indent.is_none() && min_indent > 0 {
                 }
             }
 
             if let Some(crate::lexer::tokens::TokenType::Dash) = parser.peek_kind() { break; }
 
             let key_str = match parser.peek_kind() {
-                Some(crate::lexer::tokens::TokenType::Text(s)) | Some(crate::lexer::tokens::TokenType::StringLit(s)) => s.clone(),
-                _ => break,
+                Some(crate::lexer::tokens::TokenType::Text(s)) | Some(crate::lexer::tokens::TokenType::StringLit(s)) => {
+                    if let Some(crate::lexer::tokens::TokenType::Colon) = parser.peek_kind_at(1) {
+                        s.clone()
+                    } else {
+                        return Err(ConfigError {
+                            message: format!(\"Expected key-value pair, found scalar '{}'\", s),
+                            loc: parser.peek_loc(),
+                            context: vec![],
+                        });
+                    }
+                },
+                Some(crate::lexer::tokens::TokenType::Number(n)) => {
+                    return Err(ConfigError {
+                        message: format!(\"Expected map key, found number '{}'\", n),
+                        loc: parser.peek_loc(),
+                        context: vec![],
+                    });
+                }
+                Some(t) => {
+                     return Err(ConfigError {
+                        message: format!(\"Expected map key, found {:?}\", t),
+                        loc: parser.peek_loc(),
+                        context: vec![],
+                    });
+                }
+                None => break,
             };
 
             match key_str.as_str() {

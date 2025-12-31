@@ -1,5 +1,6 @@
 servers:
   - host: "127.0.0.1"
     ports: 
-      - 8080
+  - 8888
+  - 6868
     server_name: "localhost"

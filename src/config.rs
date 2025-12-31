@@ -95,7 +95,7 @@ impl<T: FromYaml> FromYaml for Option<T> {
 impl<T: FromYaml> FromYaml for Vec<T> {
     fn from_yaml(parser: &mut ConfigParser, min_indent: usize) -> ParseResult<Self> {
         let mut items = Vec::new();
-        parser.skip_newlines_only();
+        let skipped_newline = parser.skip_newlines_only();
 
         if let Some(TokenType::LBracket) = parser.peek_kind() {
             parser.consume(TokenType::LBracket)?;
@@ -122,29 +122,32 @@ impl<T: FromYaml> FromYaml for Vec<T> {
                 if list_indent < min_indent { return Ok(items); }
             }
 
+             match parser.peek_kind() {
+                 Some(TokenType::Dash) => {
+                     if !skipped_newline {
+                         return Err(ConfigError {
+                             message: "Block list item must start on a new line".to_string(),
+                             loc: parser.peek_loc(),
+                             context: vec![],
+                         });
+                     }
+                 },
+                 Some(TokenType::Indent(_)) | Some(TokenType::Newline) | None => { },
+                 _ => {
+                     return Err(ConfigError {
+                         message: format!("Expected list (starting with '[' or '-'), found {:?}", parser.peek_kind().unwrap()),
+                         loc: parser.peek_loc(),
+                         context: vec![],
+                     });
+                 }
+             }
+
             loop {
                 parser.skip_newlines_only();
                 if let Some(TokenType::Indent(n)) = parser.peek_kind() {
                     if *n < list_indent { break; }
                     
-                    // STRICT CHECK:
-                    // If we see an indent greater than list_indent, it usually means 
-                    // it belongs to the previous item (e.g. multi-line string or nested object field),
-                    // NOT a new list item.
-                    // HOWEVER, we are looking for the next item which starts with a Dash.
-                    // If we see Indent(>n) then Dash, that's an indented list item which is mismatched.
-                    // If we see Indent(>n) then Key/Value, that's content of previous item.
-                    
-                    // But here, Vec<T> is iterating over items.
-                    // We expect the next token (after optional indent) to be Dash.
-                    // If indent > list_indent, we need to check if it's followed by Dash.
-                    // If yes -> Error (inconsistent indent).
-                    // If no -> It's probably part of previous item, but Vec<T> loop shouldn't be parsing inside item content?
-                    // actually T::from_yaml consumes the item. So when we are back here, we expect the NEXT item.
-                    // So any content here MUST start with a Dash at `list_indent`.
-                    
                     if *n > list_indent {
-                         // Check if this is a start of a new item (Dash) or just debris
                          if let Some(TokenType::Dash) = parser.peek_kind_at(1) {
                              return Err(ConfigError {
                                 message: format!("Indentation mismatch in list: found {}, expected {}", *n, list_indent),
@@ -152,27 +155,19 @@ impl<T: FromYaml> FromYaml for Vec<T> {
                                 context: vec![],
                              });
                          }
-                         // If it's not a dash, it might be something else. 
-                         // But for now, let's strictly enforce list item start.
-                         // Actually, if T consumes everything properly, we should only see:
-                         // 1. Same indent + Dash (next item)
-                         // 2. Less indent (end of list)
-                         // 3. Same indent + something else (invalid list item start)
-                         
-                         // If we see greater indent here, it means T didn't consume everything, 
-                         // OR the file structure is broken.
-                         // Let's treat it as an error for strictness if it looks like a list item.
-                         // But simpler: just enforce equality if we see a dash.
                     }
                     
                     parser.cursor += 1;
-                } else if list_indent > 0 { break; }
+                } else {
+                    // If no indent token, we only continue if we see a Dash (same-line or already consumed newline)
+                    // and if list_indent is 0. If list_indent > 0, we expect an indent token.
+                    // HOWEVER, if the previous item consumed the newline and indent, we might be at Dash.
+                    if !matches!(parser.peek_kind(), Some(TokenType::Dash)) {
+                        if list_indent > 0 { break; }
+                    }
+                }
 
                 if let Some(TokenType::Dash) = parser.peek_kind() {
-                     // Double check: if we didn't have an indent token (list_indent=0), 
-                     // but min_indent > 0, that's handled by first check.
-                     // But if list_indent > 0, we must have consumed it above.
-                     // If we are here, we are ready to consume Dash.
                     parser.consume(TokenType::Dash)?;
                     items.push(T::from_yaml(parser, list_indent)?);
                 } else { break; }
@@ -465,7 +460,6 @@ impl ConfigParser {
                         return Ok(());
                     }
                 } else {
-                    // check if another newline (empty line)
                     if matches!(self.peek_kind(), Some(TokenType::Newline)) {
                         continue;
                     }
@@ -484,7 +478,7 @@ impl ConfigParser {
 impl fmt::Display for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m")?;
-        writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m     \x1b[32m{}\\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m", self.host, self.ports)?;
+        writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m     \x1b[32m{}\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m", self.host, self.ports)?;
         writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentity:\x1b[0m    \x1b[36m{}\x1b[0m", self.server_name)?;
         writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mDefault:\x1b[0m     \x1b[{}m{}\x1b[0m", if self.default_server { "32" } else { "31" }, if self.default_server { "YES" } else { "NO" })?;
         writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mBody Limit:\x1b[0m  \x1b[33m{} KB\x1b[0m", self.client_max_body_size / 1024)?;
@@ -505,7 +499,7 @@ impl fmt::Display for ServerConfig {
         for (idx, route) in sorted_routes.iter().enumerate() {
             let is_last = idx == sorted_routes.len() - 1;
             let branch = if is_last { "  └──" } else { "  ├──" };
-            writeln!(f, "  \x1b[38;5;244m{}\\x1b[0m \x1b[1;37m{}\x1b[0m", branch, route.path)?;
+            writeln!(f, "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{}\x1b[0m", branch, route.path)?;
             route.fmt_details(f, is_last)?;
             if !is_last { writeln!(f, "  \x1b[38;5;244m    │\x1b[0m")?; }
         }
