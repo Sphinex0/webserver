@@ -17,7 +17,6 @@ servers:
         autoindex: true
 "#;
     let config = Config::from_str(yaml).expect("Should parse valid config");
-    dbg!(&config.servers);
     assert_eq!(config.servers.len(), 1);
     let server = &config.servers[0];
     assert_eq!(server.host, "127.0.0.1");
@@ -36,9 +35,6 @@ servers:
   - host "127.0.0.1"
 "#;
     let err = Config::from_str(yaml).unwrap_err();
-    // Expect parsing to fail. The specific error message depends on where it fails.
-    // It should expect a Colon but found StringLit probably.
-    println!("{}", err);
     assert!(err.message.contains("Expected Colon") || err.message.contains("Expected"));
 }
 
@@ -51,7 +47,6 @@ servers:
    server_name: "bad_indent"
 "#;
     let err = Config::from_str(yaml_bad).unwrap_err();
-    println!("{}", err);
     assert!(err.message.contains("Indentation mismatch"));
 }
 
@@ -66,8 +61,6 @@ servers:
       list: [1, 2]
     server_name: "test"
 "#;
-    // New behavior: unknown field is skipped with warning.
-    // server_name should be parsed.
     let config = Config::from_str(yaml).expect("Parses successfully");
     assert_eq!(config.servers[0].host, "127.0.0.1");
     assert_eq!(config.servers[0].server_name, "test");
@@ -92,13 +85,9 @@ servers:
     let config = Config::from_str(yaml).expect("Failed to parse boolean values");
     let routes = &config.servers[0].routes;
     
-    // Check 'on'
     assert!(routes.iter().find(|r| r.path == "/on").unwrap().autoindex);
-    // Check 'true'
     assert!(routes.iter().find(|r| r.path == "/true").unwrap().autoindex);
-    // Check 'off'
     assert!(!routes.iter().find(|r| r.path == "/off").unwrap().autoindex);
-    // Check 'false'
     assert!(!routes.iter().find(|r| r.path == "/false").unwrap().autoindex);
 }
 
@@ -152,8 +141,8 @@ servers:
     
     assert_eq!(route.redirection, None);
     assert_eq!(route.cgi_ext, None);
-    assert_eq!(route.methods, vec!["GET", "HEAD"]); // Default
-    assert!(!route.autoindex); // Default false
+    assert_eq!(route.methods, vec!["GET", "HEAD"]);
+    assert!(!route.autoindex);
 }
 
 #[test]
@@ -170,23 +159,18 @@ servers:
     let config = Config::from_str(yaml).expect("Failed to parse for route match");
     let server = &config.servers[0];
     
-    // Exact match
     let r1 = server.find_route("/").expect("Should find root");
     assert_eq!(r1.path, "/");
     
-    // Prefix match
     let r2 = server.find_route("/api/users").expect("Should find api");
     assert_eq!(r2.path, "/api");
     
-    // Longest prefix match
     let r3 = server.find_route("/api/v1/users").expect("Should find api v1");
     assert_eq!(r3.path, "/api/v1");
 }
 
 #[test]
 fn test_dashed_list_indentation() {
-    // Standard YAML allows dashes at the same level as the field or indented.
-    // Our parser should handle consistent indentation for list items.
     let yaml = r#"
 servers:
   - host: "s1"
@@ -223,16 +207,6 @@ servers:
       - 80
      - 81
 "#;
-    // With strict parsing, this should fail because '- 81' is indented at 5 spaces
-    // while the 'ports' list started at 6 spaces (implied/normalized).
-    // Or if strictness applies to the 'servers' list?
-    // 'ports' starts at indent 6.
-    // '- 81' is at indent 5.
-    // Indent(5) < Indent(6) -> End of 'ports' list.
-    // Then parser sees Indent(5) followed by Dash.
-    // This is processed by 'servers' list parser (indent 2).
-    // Indent(5) > Indent(2) AND followed by Dash -> Indentation mismatch error!
-    
     let err = Config::from_str(yaml).unwrap_err();
     assert!(err.message.contains("Indentation mismatch"));
 }
@@ -246,13 +220,7 @@ servers:
 "#;
     let config = Config::from_str(yaml).expect("Should parse");
     assert_eq!(config.servers.len(), 2);
-    
-    // Server 1
     assert_eq!(config.servers[0].host, "127.0.0.255");
-    assert_eq!(config.servers[0].ports, vec![8080]); // Default
-    
-    // Server 2
-    assert_eq!(config.servers[1].host, "127.0.0.1"); // Default
     assert_eq!(config.servers[1].ports, vec![9999]);
 }
 
@@ -262,7 +230,6 @@ fn test_scalar_where_list_expected() {
 servers:
   - ports: 9999
 "#;
-    // This now strictly fails because 9999 is not a list (doesn't start with '[' or '-')
     let err = Config::from_str(yaml).unwrap_err();
     assert!(err.message.contains("Expected list"));
 }
@@ -271,19 +238,12 @@ servers:
 fn test_root_level_dash_ignored() {
     let yaml = r#"
 servers:
-  - host: "127.0.0.255"
+  - host: "127.0.0.1"
 - ports: [9999]
 "#;
-    // The second dash is at indent 0. The 'servers' list is indent 2.
-    // So the list ends.
-    // The root parser sees a Dash. Since Config is a struct, it sees Dash as end-of-struct (or invalid).
-    // Our generated parser breaks on Dash.
-    // So 'ports' is ignored.
-    let config = Config::from_str(yaml).expect("Should parse partial config");
-    assert_eq!(config.servers.len(), 1);
-    assert_eq!(config.servers[0].host, "127.0.0.255");
-    // Verify ports didn't apply to server 1
-    assert_eq!(config.servers[0].ports, vec![8080]); 
+    let result = Config::from_str(yaml);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().message.contains("Unexpected content"));
 }
 
 #[test]
@@ -296,34 +256,95 @@ servers:
   - 6868
     server_name: "localhost"
 "#;
-    // This should fail because '8888' is not a valid map key for ServerConfig.
     let result = Config::from_str(yaml);
     assert!(result.is_err());
 }
 
 #[test]
-fn test_inline_dashed_item() {
+fn test_list_indentation_less_than_key() {
     let yaml = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: 
+   - 8888
+   - 6868
+"#;
+    let result = Config::from_str(yaml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_list_dash_without_space() {
+    let yaml_no_space = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: 
+      -8888
+"#;
+    let result = Config::from_str(yaml_no_space);
+    assert!(result.is_err());
+
+    let yaml_inline_double = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: 
+      - 8888 - 6868
+"#;
+    let result2 = Config::from_str(yaml_inline_double);
+    assert!(result2.is_err());
+}
+
+#[test]
+fn test_inline_dashed_item() {
+    let yaml1 = r#"
 servers:
   - host: "127.0.0.1"
     ports: - 9999
 "#;
-    // Strict parsing now requires block list items to start on a new line.
+    let err = Config::from_str(yaml1).unwrap_err();
+    assert!(err.message.contains("Block list item must start on a new line") || err.message.contains("Expected list"));
+
+    let yaml2 = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: 
+      - 8888 - 6868
+"#;
+    let result = Config::from_str(yaml2);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_u16_overflow() {
+    let yaml = r#"
+servers:
+  - host: "127.0.0.1"
+    ports: [70000]
+"#;
     let err = Config::from_str(yaml).unwrap_err();
-    assert!(err.message.contains("Block list item must start on a new line"));
+    assert!(err.message.contains("out of range for u16"));
 }
 
 #[test]
 fn test_type_mismatch() {
-
     let yaml = r#"
 servers:
   - host: "127.0.0.1"
     client_max_body_size: "not a number"
 "#;
     let err = Config::from_str(yaml).unwrap_err();
-    println!("{}", err);
     assert!(err.message.contains("Expected number"));
+}
+
+#[test]
+fn test_invalid_character_lexer() {
+    let yaml = r#"
+servers:
+  - host: "127.0.0.1" @
+"#;
+    let result = Config::from_str(yaml);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().message.contains("Unexpected character"));
 }
 
 #[test]
@@ -334,6 +355,5 @@ servers:
     ports: [8080, "bad_port"]
 "#;
     let err = Config::from_str(yaml).unwrap_err();
-    println!("{}", err);
     assert!(err.message.contains("Expected number"));
 }

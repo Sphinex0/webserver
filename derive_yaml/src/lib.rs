@@ -56,7 +56,7 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
     let mut arms = String::new();
     for field in fields {
         let arm = format!(
-            "{0}{1}{0} => {{ parser.consume_key({0}{1}{0})?; obj.{1} = FromYaml::from_yaml(parser, min_indent).map_err(|mut e| {{ e.context.push(format!({0}parsing field '{1}'{0})); e }})?; }},
+            "{0}{1}{0} => {{ parser.consume_key({0}{1}{0})?; obj.{1} = FromYaml::from_yaml(parser, struct_indent.unwrap_or(min_indent)).map_err(|mut e| {{ e.context.push(format!({0}parsing field '{1}'{0})); e }})?; }},
 ",
             q, field
         );
@@ -143,6 +143,9 @@ pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
                 _ => {
                     eprintln!(\"Warning: Unknown field '{}'\", key_str);
                     parser.consume_key(&key_str)?;
+                    // Pass struct_indent if available, else min_indent.
+                    // Actually, for unknown fields, we want to skip based on *their* indent?
+                    // skip_value handles indentation.
                     parser.skip_value(struct_indent.unwrap_or(min_indent))?;
                 }
             }

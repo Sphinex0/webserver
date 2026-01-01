@@ -64,7 +64,32 @@ impl<'a> Lexer<'a> {
             match c {
                 // 3. Structural Symbols
                 ':' => { tokens.push(Token { kind: TokenType::Colon, loc }); self.advance(); is_start_of_line = false; }
-                '-' => { tokens.push(Token { kind: TokenType::Dash, loc }); self.advance(); is_start_of_line = false; }
+                '-' => { 
+                    self.advance(); // Consume the dash first
+                    
+                    // Now peek checks the next character
+                    let next_is_separator = match self.peek() {
+                        Some(n) => n.is_whitespace(), 
+                        None => true, 
+                    };
+
+                    if next_is_separator {
+                        tokens.push(Token { kind: TokenType::Dash, loc }); 
+                        is_start_of_line = false; 
+                    } else {
+                        // Treat as text start
+                        let mut val = String::from("-");
+                        
+                        while let Some(&n) = self.peek() {
+                            if n.is_alphanumeric() || "._-/".contains(n) {
+                                val.push(n);
+                                self.advance();
+                            } else { break; }
+                        }
+                        tokens.push(Token { kind: TokenType::Text(val), loc });
+                        is_start_of_line = false;
+                    }
+                }
                 '[' => { tokens.push(Token { kind: TokenType::LBracket, loc }); self.advance(); is_start_of_line = false; }
                 ']' => { tokens.push(Token { kind: TokenType::RBracket, loc }); self.advance(); is_start_of_line = false; }
                 ',' => { tokens.push(Token { kind: TokenType::Comma, loc }); self.advance(); is_start_of_line = false; }
@@ -102,6 +127,18 @@ impl<'a> Lexer<'a> {
                             self.advance();
                         } else { break; }
                     }
+                    
+                    if val.is_empty() {
+                        // Unknown character (e.g. '%', '@', etc.)
+                        // Advance to prevent infinite loop and optionally return error
+                        let char_opt = self.peek().copied(); 
+                        if let Some(c) = char_opt {
+                             return Err(format!("Unexpected character: '{}' at line {}, col {}", c, self.line, self.col));
+                        } else {
+                             break; // EOF
+                        }
+                    }
+
                     if let Ok(num) = val.parse::<u64>() {
                         tokens.push(Token { kind: TokenType::Number(num), loc });
                     } else {

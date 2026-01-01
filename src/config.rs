@@ -1,5 +1,5 @@
-use std::{collections::HashMap, fmt};
 use derive_yaml::FromYaml;
+use std::{collections::HashMap, fmt};
 
 use crate::lexer::tokens::{Loc, Token, TokenType};
 
@@ -23,9 +23,17 @@ pub struct ConfigError {
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "❌ \x1b[1;31mConfiguration Error\x1b[0m: {}", self.message)?;
+        write!(
+            f,
+            "❌ \x1b[1;31mConfiguration Error\x1b[0m: {}",
+            self.message
+        )?;
         if let Some(loc) = self.loc {
-            write!(f, " \x1b[38;5;244m(at line {}, col {})\x1b[0m", loc.line, loc.col)?;
+            write!(
+                f,
+                " \x1b[38;5;244m(at line {}, col {})\x1b[0m",
+                loc.line, loc.col
+            )?;
         }
         if !self.context.is_empty() {
             writeln!(f, "\n   \x1b[1;34mContext trace:\x1b[0m")?;
@@ -55,7 +63,17 @@ pub trait FromYaml: Sized {
             context: vec!["Lexing phase".to_string()],
         })?;
         let mut parser = ConfigParser::new(tokens);
-        Self::from_yaml(&mut parser, 0)
+        let result = Self::from_yaml(&mut parser, 0)?;
+        
+        parser.skip_newlines();
+        if parser.peek_kind().is_some() {
+            return Err(ConfigError {
+                message: format!("Unexpected content after configuration: {:?}", parser.peek_kind().unwrap()),
+                loc: parser.peek_loc(),
+                context: vec![],
+            });
+        }
+        Ok(result)
     }
 }
 
@@ -69,7 +87,16 @@ impl FromYaml for String {
 
 impl FromYaml for u16 {
     fn from_yaml(parser: &mut ConfigParser, _min_indent: usize) -> ParseResult<Self> {
-        parser.parse_scalar_number().map(|n| n as u16)
+        let loc = parser.peek_loc();
+        let n = parser.parse_scalar_number()?;
+        if n > u16::MAX as u64 {
+            return Err(ConfigError {
+                message: format!("Value {} is out of range for u16 (max {})", n, u16::MAX),
+                loc,
+                context: vec![],
+            });
+        }
+        Ok(n as u16)
     }
 }
 
@@ -100,7 +127,10 @@ impl<T: FromYaml> FromYaml for Vec<T> {
         if let Some(TokenType::LBracket) = parser.peek_kind() {
             parser.consume(TokenType::LBracket)?;
             loop {
-                while matches!(parser.peek_kind(), Some(TokenType::Newline) | Some(TokenType::Indent(_))) {
+                while matches!(
+                    parser.peek_kind(),
+                    Some(TokenType::Newline) | Some(TokenType::Indent(_))
+                ) {
                     parser.cursor += 1;
                 }
                 if let Some(TokenType::RBracket) = parser.peek_kind() {
@@ -108,7 +138,10 @@ impl<T: FromYaml> FromYaml for Vec<T> {
                     break;
                 }
                 items.push(T::from_yaml(parser, min_indent)?);
-                while matches!(parser.peek_kind(), Some(TokenType::Newline) | Some(TokenType::Indent(_))) {
+                while matches!(
+                    parser.peek_kind(),
+                    Some(TokenType::Newline) | Some(TokenType::Indent(_))
+                ) {
                     parser.cursor += 1;
                 }
                 if let Some(TokenType::Comma) = parser.peek_kind() {
@@ -119,67 +152,82 @@ impl<T: FromYaml> FromYaml for Vec<T> {
             let mut list_indent = 0;
             if let Some(TokenType::Indent(n)) = parser.peek_kind() {
                 list_indent = *n;
-                if list_indent < min_indent { return Ok(items); }
+                if list_indent < min_indent {
+                    return Ok(items);
+                }
             }
 
-             match parser.peek_kind() {
-                 Some(TokenType::Dash) => {
-                     if !skipped_newline {
-                         return Err(ConfigError {
-                             message: "Block list item must start on a new line".to_string(),
-                             loc: parser.peek_loc(),
-                             context: vec![],
-                         });
-                     }
-                 },
-                 Some(TokenType::Indent(_)) | Some(TokenType::Newline) | None => { },
-                 _ => {
-                     return Err(ConfigError {
-                         message: format!("Expected list (starting with '[' or '-'), found {:?}", parser.peek_kind().unwrap()),
-                         loc: parser.peek_loc(),
-                         context: vec![],
-                     });
-                 }
-             }
+            match parser.peek_kind() {
+                Some(TokenType::Dash) => {
+                    if !skipped_newline {
+                        return Err(ConfigError {
+                            message: "Block list item must start on a new line".to_string(),
+                            loc: parser.peek_loc(),
+                            context: vec![],
+                        });
+                    }
+                }
+                Some(TokenType::Indent(_)) | Some(TokenType::Newline) | None => {}
+                _ => {
+                    return Err(ConfigError {
+                        message: format!(
+                            "Expected list (starting with '[' or '-'), found {:?}",
+                            parser.peek_kind().unwrap()
+                        ),
+                        loc: parser.peek_loc(),
+                        context: vec![],
+                    });
+                }
+            }
 
             loop {
-                parser.skip_newlines_only();
+                let newline_skipped_in_loop = parser.skip_newlines_only();
                 if let Some(TokenType::Indent(n)) = parser.peek_kind() {
-                    if *n < list_indent { break; }
-                    
+                    if *n < list_indent {
+                        break;
+                    }
+
                     if *n > list_indent {
-                         if let Some(TokenType::Dash) = parser.peek_kind_at(1) {
-                             return Err(ConfigError {
-                                message: format!("Indentation mismatch in list: found {}, expected {}", *n, list_indent),
+                        if let Some(TokenType::Dash) = parser.peek_kind_at(1) {
+                            return Err(ConfigError {
+                                message: format!(
+                                    "Indentation mismatch in list: found {}, expected {}",
+                                    *n, list_indent
+                                ),
                                 loc: parser.peek_loc(),
                                 context: vec![],
-                             });
-                         }
+                            });
+                        }
                     }
-                    
+
                     parser.cursor += 1;
                 } else {
-                    // If no indent token, we only continue if we see a Dash (same-line or already consumed newline)
-                    // and if list_indent is 0. If list_indent > 0, we expect an indent token.
-                    // HOWEVER, if the previous item consumed the newline and indent, we might be at Dash.
-                    if !matches!(parser.peek_kind(), Some(TokenType::Dash)) {
-                        if list_indent > 0 { break; }
+                    if list_indent > 0 {
+                        break;
                     }
                 }
 
                 if let Some(TokenType::Dash) = parser.peek_kind() {
+                    if list_indent == 0 && !newline_skipped_in_loop {
+                        return Err(ConfigError {
+                            message: "Block list item must start on a new line".to_string(),
+                            loc: parser.peek_loc(),
+                            context: vec![],
+                        });
+                    }
+
                     parser.consume(TokenType::Dash)?;
                     items.push(T::from_yaml(parser, list_indent)?);
-                } else { break; }
+                } else {
+                    break;
+                }
             }
         }
         Ok(items)
     }
 }
 
-
-impl<K, V>
-    FromYaml for HashMap<K, V>
+impl<K, V> FromYaml for HashMap<K, V>
 where
     K: FromYaml + std::cmp::Eq + std::hash::Hash + fmt::Display,
     V: FromYaml,
@@ -187,7 +235,7 @@ where
     fn from_yaml(parser: &mut ConfigParser, _min_indent: usize) -> ParseResult<Self> {
         let mut map = HashMap::new();
         parser.skip_newlines_only();
-        
+
         let mut map_indent = 0;
         if let Some(TokenType::Indent(n)) = parser.peek_kind() {
             map_indent = *n;
@@ -196,23 +244,32 @@ where
         loop {
             parser.skip_newlines_only();
             if let Some(TokenType::Indent(n)) = parser.peek_kind() {
-                if *n < map_indent { break; }
+                if *n < map_indent {
+                    break;
+                }
                 parser.cursor += 1;
-            } else if map_indent > 0 { break; }
-
-            match parser.peek_kind() {
-                 None | Some(TokenType::Dash) | Some(TokenType::RBracket) => break,
-                 _ => {}
+            } else if map_indent > 0 {
+                break;
             }
 
-            let key = K::from_yaml(parser, map_indent)
-                .map_err(|mut e| { e.context.push("parsing map key".to_string()); e })?;
-            
+            match parser.peek_kind() {
+                None | Some(TokenType::Dash) | Some(TokenType::RBracket) => break,
+                _ => {}
+            }
+
+            let key = K::from_yaml(parser, map_indent).map_err(|mut e| {
+                e.context.push("parsing map key".to_string());
+                e
+            })?;
+
             parser.consume(TokenType::Colon)?;
-            
-            let value = V::from_yaml(parser, map_indent)
-                .map_err(|mut e| { e.context.push(format!("parsing map value for key '{}'", key)); e })?;
-            
+
+            let value = V::from_yaml(parser, map_indent).map_err(|mut e| {
+                e.context
+                    .push(format!("parsing map value for key '{}'", key));
+                e
+            })?;
+
             map.insert(key, value);
         }
         Ok(map)
@@ -314,10 +371,7 @@ pub struct ConfigParser {
 
 impl ConfigParser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self {
-            tokens,
-            cursor: 0,
-        }
+        Self { tokens, cursor: 0 }
     }
 
     pub fn peek_kind(&self) -> Option<&TokenType> {
@@ -349,7 +403,9 @@ impl ConfigParser {
     pub fn consume(&mut self, expected: TokenType) -> ParseResult<()> {
         let loc = self.peek_loc();
         match self.next_token() {
-            Some(t) if std::mem::discriminant(&t.kind) == std::mem::discriminant(&expected) => Ok(()),
+            Some(t) if std::mem::discriminant(&t.kind) == std::mem::discriminant(&expected) => {
+                Ok(())
+            }
             Some(t) => Err(ConfigError {
                 message: format!("Expected {:?}, found {:?}", expected, t.kind),
                 loc: Some(t.loc),
@@ -372,7 +428,9 @@ impl ConfigParser {
         while let Some(k) = self.peek_kind() {
             if matches!(k, TokenType::Newline | TokenType::Indent(_)) {
                 self.cursor += 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
     }
 
@@ -425,25 +483,25 @@ impl ConfigParser {
 
     pub fn skip_value(&mut self, min_indent: usize) -> ParseResult<()> {
         loop {
-             if matches!(self.peek_kind(), Some(TokenType::Newline)) {
-                 break;
-             }
-             if self.peek_kind().is_none() {
-                 return Ok(());
-             }
-             self.cursor += 1;
+            if matches!(self.peek_kind(), Some(TokenType::Newline)) {
+                break;
+            }
+            if self.peek_kind().is_none() {
+                return Ok(());
+            }
+            self.cursor += 1;
         }
-        
+
         loop {
             if matches!(self.peek_kind(), Some(TokenType::Newline)) {
                 self.cursor += 1; // Consume Newline
-                
+
                 let indent_val = if let Some(TokenType::Indent(n)) = self.peek_kind() {
                     Some(*n)
                 } else {
                     None
                 };
-                
+
                 if let Some(n) = indent_val {
                     if n > min_indent {
                         self.cursor += 1; // Consume Indent
@@ -451,9 +509,9 @@ impl ConfigParser {
                             if matches!(self.peek_kind(), Some(TokenType::Newline)) {
                                 break;
                             }
-                             if self.peek_kind().is_none() {
-                                 return Ok(());
-                             }
+                            if self.peek_kind().is_none() {
+                                return Ok(());
+                            }
                             self.cursor += 1;
                         }
                     } else {
@@ -477,31 +535,68 @@ impl ConfigParser {
 
 impl fmt::Display for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m")?;
+        writeln!(
+            f,
+            "  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m"
+        )?;
         writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mNetwork:\x1b[0m     \x1b[32m{}\x1b[0m \x1b[38;5;244mvia ports\x1b[0m \x1b[1;32m{:?}\x1b[0m", self.host, self.ports)?;
-        writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentity:\x1b[0m    \x1b[36m{}\x1b[0m", self.server_name)?;
-        writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mDefault:\x1b[0m     \x1b[{}m{}\x1b[0m", if self.default_server { "32" } else { "31" }, if self.default_server { "YES" } else { "NO" })?;
-        writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mBody Limit:\x1b[0m  \x1b[33m{} KB\x1b[0m", self.client_max_body_size / 1024)?;
+        writeln!(
+            f,
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mIdentity:\x1b[0m    \x1b[36m{}\x1b[0m",
+            self.server_name
+        )?;
+        writeln!(
+            f,
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mDefault:\x1b[0m     \x1b[{}m{}\x1b[0m",
+            if self.default_server { "32" } else { "31" },
+            if self.default_server { "YES" } else { "NO" }
+        )?;
+        writeln!(
+            f,
+            "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mBody Limit:\x1b[0m  \x1b[33m{} KB\x1b[0m",
+            self.client_max_body_size / 1024
+        )?;
 
         if !self.error_pages.is_empty() {
             writeln!(f, "  \x1b[1;34m⦿\x1b[0m \x1b[1;37mError Pages:\x1b[0m")?;
             for (code, path) in &self.error_pages {
-                writeln!(f, "    \x1b[38;5;244m{:4}\x1b[0m → \x1b[31m{}\x1b[0m", code, path)?;
+                writeln!(
+                    f,
+                    "    \x1b[38;5;244m{:4}\x1b[0m → \x1b[31m{}\x1b[0m",
+                    code, path
+                )?;
             }
         }
 
-        writeln!(f, "\n  \x1b[1;37m📋 ROUTING TABLE ({}) \x1b[0m", self.routes.len())?;
-        writeln!(f, "  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m")?;
+        writeln!(
+            f,
+            "\n  \x1b[1;37m📋 ROUTING TABLE ({}) \x1b[0m",
+            self.routes.len()
+        )?;
+        writeln!(
+            f,
+            "  \x1b[38;5;244m───────────────────────────────────────────────\x1b[0m"
+        )?;
 
         let mut sorted_routes = self.routes.clone();
         sorted_routes.sort_by(|a, b| a.path.cmp(&b.path));
 
         for (idx, route) in sorted_routes.iter().enumerate() {
             let is_last = idx == sorted_routes.len() - 1;
-            let branch = if is_last { "  └──" } else { "  ├──" };
-            writeln!(f, "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{}\x1b[0m", branch, route.path)?;
+            let branch = if is_last {
+                "  └──"
+            } else {
+                "  ├──"
+            };
+            writeln!(
+                f,
+                "  \x1b[38;5;244m{}\x1b[0m \x1b[1;37m{}\x1b[0m",
+                branch, route.path
+            )?;
             route.fmt_details(f, is_last)?;
-            if !is_last { writeln!(f, "  \x1b[38;5;244m    │\x1b[0m")?; }
+            if !is_last {
+                writeln!(f, "  \x1b[38;5;244m    │\x1b[0m")?;
+            }
         }
         Ok(())
     }
@@ -513,19 +608,54 @@ impl RouteConfig {
         let methods_fmt = self.methods.join(" | ");
         let route_limit = format!("{} KB", self.client_max_body_size / 1024);
 
-        writeln!(f, "  \x1b[38;5;250m{}├─ Methods:\x1b[0m \x1b[48;5;236m\x1b[38;5;250m {}\x1b[0m", if is_last_route { "   " } else { "    " }, methods_fmt)?;
-        writeln!(f, "  \x1b[38;5;250m{}├─ Root:\x1b[0m    \x1b[32m{}\x1b[0m", indent, self.root)?;
-        writeln!(f, "  \x1b[38;5;250m{}├─ Default:\x1b[0m  \x1b[36m{}\x1b[0m", indent, self.default_file)?;
-        writeln!(f, "  \x1b[38;5;250m{}├─ Body Limit:\x1b[0m \x1b[33m{}\x1b[0m", indent, route_limit)?;
-        writeln!(f, "  \x1b[38;5;250m{}├─ Autoindex:\x1b[0m \x1b[{}m{}\x1b[0m", indent, if self.autoindex { "32" } else { "31" }, if self.autoindex { "ON" } else { "OFF" })?;
+        writeln!(
+            f,
+            "  \x1b[38;5;250m{}├─ Methods:\x1b[0m \x1b[48;5;236m\x1b[38;5;250m {}\x1b[0m",
+            if is_last_route { "   " } else { "    " },
+            methods_fmt
+        )?;
+        writeln!(
+            f,
+            "  \x1b[38;5;250m{}├─ Root:\x1b[0m    \x1b[32m{}\x1b[0m",
+            indent, self.root
+        )?;
+        writeln!(
+            f,
+            "  \x1b[38;5;250m{}├─ Default:\x1b[0m  \x1b[36m{}\x1b[0m",
+            indent, self.default_file
+        )?;
+        writeln!(
+            f,
+            "  \x1b[38;5;250m{}├─ Body Limit:\x1b[0m \x1b[33m{}\x1b[0m",
+            indent, route_limit
+        )?;
+        writeln!(
+            f,
+            "  \x1b[38;5;250m{}├─ Autoindex:\x1b[0m \x1b[{}m{}\x1b[0m",
+            indent,
+            if self.autoindex { "32" } else { "31" },
+            if self.autoindex { "ON" } else { "OFF" }
+        )?;
 
         if let Some(redir) = &self.redirection {
-            writeln!(f, "  \x1b[38;5;250m{}├─ Redirect:\x1b[0m \x1b[35m{}\x1b[0m", indent, redir)?;
+            writeln!(
+                f,
+                "  \x1b[38;5;250m{}├─ Redirect:\x1b[0m \x1b[35m{}\x1b[0m",
+                indent, redir
+            )?;
         }
         if let Some(cgi) = &self.cgi_ext {
-            writeln!(f, "  \x1b[38;5;250m{}└─ CGI:\x1b[0m     \x1b[38;5;208m{}\x1b[0m", indent, cgi)?;
+            writeln!(
+                f,
+                "  \x1b[38;5;250m{}└─ CGI:\x1b[0m     \x1b[38;5;208m{}\x1b[0m",
+                indent, cgi
+            )?;
         } else {
-            writeln!(f, "  \x1b[38;5;250m{}└─ CGI:\x1b[0m      \x1b[31mDISABLED\x1b[0m", indent)?;
+            writeln!(
+                f,
+                "  \x1b[38;5;250m{}└─ CGI:\x1b[0m      \x1b[31mDISABLED\x1b[0m",
+                indent
+            )?;
         }
         Ok(())
     }
@@ -533,12 +663,16 @@ impl RouteConfig {
 
 pub fn display_config(configs: &Vec<ServerConfig>) {
     println!("\n\x1b[1;35m 🌐 SERVER CONFIGURATION DASHBOARD\x1b[0m");
-    println!("\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m");
+    println!(
+        "\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m"
+    );
     for (i, server) in configs.iter().enumerate() {
         println!("\n  \x1b[1;37mSERVER BLOCK {:02}\x1b[0m", i + 1);
         print!("{}", server);
     }
-    println!("\n\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m");
+    println!(
+        "\n\x1b[38;5;240m ════════════════════════════════════════════════════════════════\x1b[0m"
+    );
     println!(" \x1b[1;32m✔\x1b[0m Configuration loaded successfully - Ready for requests!\n");
 }
 
