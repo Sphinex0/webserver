@@ -1,8 +1,7 @@
 servers:
-  - ports: 
-      - 9001 
-      - 5555
-
-    server_name: "loca"
-  - host: 127.255.255.255
-  - host: 127.127.127.127
+  - host: "127.0.0.1"
+    ports: [8087]
+    server_name: "localhost"
+  - host: "127.0.0.1"
+    ports: [8087]
+    server_name: "proxy.local"
