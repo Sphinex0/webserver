@@ -9,11 +9,13 @@ fn main() -> io::Result<()> {
     let config = Config::from_str(&raw_config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
+    // 2. Validate Configuration
+    let valid_servers = server::config::validate_configs(config.servers);
 
-    // 2. Display Configuration Summary
-    display_config(&config.servers);
+    // 3. Display Configuration Summary
+    display_config(&valid_servers);
 
-    // 3. Initialize and Run Server
-    let mut server = Server::new(config.servers)?;
+    // 4. Initialize and Run Server
+    let mut server = Server::new(valid_servers)?;
     server.run()
 }

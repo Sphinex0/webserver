@@ -1,7 +1,7 @@
 servers:
   - host: "127.0.0.1"
     ports: [8087]
-    server_name: "localhost"
-  - host: "127.0.0.1"
+    server_name: "proxy.local"  
+  - host: "127.0.0.2"
     ports: [8087]
     server_name: "proxy.local"
