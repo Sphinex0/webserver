@@ -1,5 +1,5 @@
 use std::io;
-use server::{config::{Config, FromYaml, display_config}, server::Server};
+use server::{config::{Config, FromYaml, display_config, validate_configs}, server::Server};
 
 fn main() -> io::Result<()> {
     // 1. Read and Parse Config
@@ -10,7 +10,7 @@ fn main() -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // 2. Validate Configuration
-    let valid_servers = server::config::validate_configs(config.servers);
+    let valid_servers = validate_configs(config.servers);
 
     // 3. Display Configuration Summary
     display_config(&valid_servers);

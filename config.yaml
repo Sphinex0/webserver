@@ -1,7 +1,19 @@
 servers:
   - host: "127.0.0.1"
-    ports: [8087]
+    ports: [8088]
     server_name: "proxy.local"  
-  - host: "127.0.0.2"
-    ports: [8087]
-    server_name: "proxy.local"
+    routes: 
+     - path: "/"
+       root: "./www/html"
+       default_file: "index.html"
+      #  redirection: "http://google.com"
+
+
+  # - host: "127.0.0.1"
+  #   ports: [8087]
+  #   default_server: true
+  #   server_name: "proxy.local2"  
+  #   routes: 
+  #    - path: "/gg"
+  #      root: "./www/html"
+  #      default_file: "index.html"

@@ -86,7 +86,6 @@ impl HttpRequest {
             match extract_and_parse_header_line(&mut self.buffer)? {
                 Some((key, value)) => {
                     if key == "Incomplete" {
-                        // return Ok!(());
                         return Err("Incomplete");
                     }
 
@@ -127,15 +126,19 @@ impl HttpRequest {
                 ParsingState::Headers => {
                     if let Err(err) = self.parse_headers() {
                         if err.contains("Incomplete") {
+
                             return Ok(&self.state);
                         }
 
                         self.state = ParsingState::Error;
                         return Err(err);
                     }
+
                     
                 }
-                ParsingState::Body(_) => self.state = ParsingState::Complete,
+                ParsingState::Body(_) => {
+                    self.state = ParsingState::Complete
+                },
                 ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
             }
         }

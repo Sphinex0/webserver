@@ -37,10 +37,10 @@ impl HttpConnection {
 
     /// Resolves the correct configuration based on the Host header.
     /// Defaults to the first candidate (or the one marked default_server) if no match.
-    fn resolve_config(&self) -> Arc<ServerConfig> {
+    pub fn resolve_config(&self) -> Arc<ServerConfig> {
         if let Some(host_header) = self.request.headers.get("Host") {
             // Host header might be "example.com:8080", we usually just care about the name "example.com"
-            // but strict matching might require checking the port too. 
+            // but strict matching might require checking the port too.
             // For now, let's split off the port if present.
             let hostname = host_header.split(':').next().unwrap_or("");
 
@@ -66,7 +66,7 @@ impl HttpConnection {
 pub struct Server {
     poll: Poll,
     // Token -> (Listener, List of Configs for this port)
-    listeners: HashMap<Token, (TcpListener, Vec<Arc<ServerConfig>>)>, 
+    listeners: HashMap<Token, (TcpListener, Vec<Arc<ServerConfig>>)>,
     connections: HashMap<Token, HttpConnection>,
     next_token: usize,
 }
@@ -84,15 +84,21 @@ impl Server {
             let shared_config = Arc::new(config);
             for port in &shared_config.ports {
                 let key = (shared_config.host.clone(), *port);
-                groups.entry(key).or_default().push(Arc::clone(&shared_config));
+                groups
+                    .entry(key)
+                    .or_default()
+                    .push(Arc::clone(&shared_config));
             }
         }
 
         for ((host, port), config_list) in groups {
             let addr_str = format!("{}:{}", host, port);
-            let addr = addr_str
-                .parse()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid address: {}", addr_str)))?;
+            let addr = addr_str.parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid address: {}", addr_str),
+                )
+            })?;
 
             let mut listener = TcpListener::bind(addr)?;
             let token = Token(next_token);
@@ -137,7 +143,7 @@ impl Server {
         // We can't clone candidates inside the match because we borrow listener.
         // But we can clone the Arc list before looping or inside the loop if we are careful.
         // Actually, Vec<Arc<...>> is cheap to clone.
-        let candidates_clone = candidates.clone();
+        // let candidates_clone = candidates.clone();
 
         loop {
             match listener.accept() {
@@ -150,7 +156,7 @@ impl Server {
                         .register(&mut stream, client_token, Interest::READABLE)?;
 
                     // Create connection with the candidates
-                    let conn = HttpConnection::new(stream, candidates_clone.clone());
+                    let conn = HttpConnection::new(stream, candidates.clone());
                     self.connections.insert(client_token, conn);
                     println!("Accepted {} on listener token {:?}", addr, token);
                 }
@@ -194,7 +200,7 @@ impl Server {
                 }
             }
         }
-        
+
         if event.is_writable() {
             if !conn.write_buffer.is_empty() {
                 // We need to handle potential partial writes
@@ -202,12 +208,14 @@ impl Server {
                     Ok(bytes_written) => {
                         conn.write_buffer.drain(..bytes_written);
                         if conn.write_buffer.is_empty() {
-                            self.poll
-                                .registry()
-                                .reregister(&mut conn.stream, token, Interest::READABLE)?;
+                            self.poll.registry().reregister(
+                                &mut conn.stream,
+                                token,
+                                Interest::READABLE,
+                            )?;
                         }
-                         // Check pipeline processing
-                         if conn.write_buffer.is_empty() && !conn.request.buffer.is_empty() {
+                        // Check pipeline processing
+                        if conn.write_buffer.is_empty() && !conn.request.buffer.is_empty() {
                             match conn.request.parse() {
                                 Ok(ParsingState::Complete) => {
                                     Self::process_request(conn, self.poll.registry(), token)?;
@@ -217,7 +225,7 @@ impl Server {
                             }
                         }
                     }
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {},
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
                     Err(_) => {
                         conn.is_closing = true;
                     }
@@ -295,38 +303,55 @@ Connection: close
             Some(r) => r,
             None => {
                 Self::queue_error(conn, registry, token, 404);
-                return Ok(())
+                return Ok(());
             }
         };
 
         // 2. Check Methods
         if !route.methods.contains(&method) {
             Self::queue_error(conn, registry, token, 405);
-            return Ok(())
+            return Ok(());
+        }
+        if route.redirection.is_some() {
+            let response = format!(
+                "HTTP/1.1 301 Moved Permanently
+Location: {}
+Connection: close
+
+",
+                route.redirection.as_ref().unwrap()
+            );
+            conn.write_buffer.extend_from_slice(response.as_bytes());
+        } else {
+            // 3. Simple GET implementation (Static Files)
+            if method == "GET" {
+                let full_path;
+                if !route.default_file.is_empty() && path == route.path {
+                    full_path = format!("{}/{}", route.root, route.default_file);
+                } else {
+                    full_path = format!(
+                        "{}/{}",
+                        route.root,
+                        path.strip_prefix(&route.path).unwrap_or("")
+                    );
+                }
+                println!("Serving file: {}", full_path);
+                match std::fs::read(&full_path) {
+                    Ok(content) => {
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                            content.len()
+                        );
+                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                        conn.write_buffer.extend_from_slice(&content);
+                    }
+                    Err(_err) => {
+                        Self::queue_error(conn, registry, token, 404);
+                    }
+                }
+            }
         }
 
-        // 3. Simple GET implementation (Static Files)
-        if method == "GET" {
-            let full_path;
-            if !route.default_file.is_empty() && path == "/" {
-                full_path = format!("{}/{}", route.root, route.default_file);
-            } else {
-                full_path = format!("{}{}", route.root, path);
-            }
-            match std::fs::read(&full_path) {
-                Ok(content) => {
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                        content.len()
-                    );
-                    conn.write_buffer.extend_from_slice(response.as_bytes());
-                    conn.write_buffer.extend_from_slice(&content);
-                }
-                Err(_err) => {
-                    Self::queue_error(conn, registry, token, 404);
-                }
-            }
-        }
         // 4. POST and DELETE logic would go here
 
         registry.reregister(
