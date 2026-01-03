@@ -136,8 +136,15 @@ impl HttpRequest {
 
                     
                 }
-                ParsingState::Body(_) => {
-                    self.state = ParsingState::Complete
+                ParsingState::Body(total_len) => {
+                    if self.buffer.len() >= total_len {
+                        let body_data: Vec<u8> = self.buffer.drain(..total_len).collect();
+                        self.body = body_data;
+                        self.state = ParsingState::Complete;
+                        return Ok(&self.state);
+                    }
+                    // Still waiting for more data
+                    return Ok(&self.state);
                 },
                 ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
             }

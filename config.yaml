@@ -1,19 +1,22 @@
 servers:
   - host: "127.0.0.1"
-    ports: [8088]
+    ports: [8080]
     server_name: "proxy.local"  
+    client_max_body_size: 1024
+      
     routes: 
      - path: "/"
        root: "./www/html"
-       default_file: "index.html"
+       autoindex: true
+      #  default_file: "index.html"
       #  redirection: "http://google.com"
 
 
-  # - host: "127.0.0.1"
-  #   ports: [8087]
-  #   default_server: true
-  #   server_name: "proxy.local2"  
-  #   routes: 
-  #    - path: "/gg"
-  #      root: "./www/html"
-  #      default_file: "index.html"
+  - host: "127.0.0.2"
+    ports: [3000]
+    default_server: true
+    server_name: "test"  
+    routes: 
+     - path: "/gg"
+       root: "./www/html"
+       default_file: "index.html"

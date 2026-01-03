@@ -74,7 +74,6 @@ impl RouteConfig {
     pub(crate) fn fmt_details(&self, f: &mut fmt::Formatter<'_>, is_last_route: bool) -> fmt::Result {
         let indent = if is_last_route { "     " } else { "  │  " };
         let methods_fmt = self.methods.join(" | ");
-        let route_limit = format!("{} KB", self.client_max_body_size / 1024);
 
         writeln!(
             f, 
@@ -91,11 +90,6 @@ impl RouteConfig {
             f, 
             "  \x1b[38;5;250m{}├─ Default:\x1b[0m  \x1b[36m{}\x1b[0m",
             indent, self.default_file
-        )?;
-        writeln!(
-            f, 
-            "  \x1b[38;5;250m{}├─ Body Limit:\x1b[0m \x1b[33m{}\x1b[0m",
-            indent, route_limit
         )?;
         writeln!(
             f, 

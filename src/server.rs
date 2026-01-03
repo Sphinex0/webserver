@@ -184,10 +184,34 @@ impl Server {
                     Ok(n) => {
                         conn.request.append_data(&stack_buf[..n]);
                         match conn.request.parse() {
-                            Ok(ParsingState::Complete) => {
-                                Self::process_request(conn, self.poll.registry(), token)?;
-                                conn.request.clear();
-                                break;
+                            Ok(ParsingState::Body(_)) | Ok(ParsingState::Complete) => {
+                                // Check Content-Length as soon as headers are available (or body accumulation starts)
+                                // We need to resolve config now to check limits
+                                let config = conn.resolve_config();
+                                
+                                let max_size = config.client_max_body_size;
+
+                                // Check Content-Length Header
+                                if let Some(cl_str) = conn.request.headers.get("Content-Length") {
+                                    if let Ok(cl) = cl_str.parse::<usize>() {
+                                        if cl > max_size {
+                                            Self::queue_error(conn, self.poll.registry(), token, 413);
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Also check actual buffered size just in case (defense in depth)
+                                if conn.request.body.len() + conn.request.buffer.len() > max_size {
+                                     Self::queue_error(conn, self.poll.registry(), token, 413);
+                                     break;
+                                }
+
+                                if conn.request.state == ParsingState::Complete {
+                                    Self::process_request(conn, self.poll.registry(), token)?;
+                                    conn.request.clear();
+                                    break;
+                                }
                             }
                             _ => {}
                         }
@@ -240,6 +264,48 @@ impl Server {
         Ok(())
     }
 
+    fn generate_autoindex_html(dir_path: &str, req_path: &str) -> io::Result<String> {
+        let entries = std::fs::read_dir(dir_path)?;
+        let mut html = String::from("<!DOCTYPE html><html><head><title>Index</title></head><body>");
+        html.push_str(&format!("<h1>Index of {}</h1><ul>", req_path));
+
+        // Add parent directory link if not root
+        if req_path != "/" {
+            let parent_path = std::path::Path::new(req_path).parent().unwrap_or(std::path::Path::new("/")).to_str().unwrap_or("/");
+            html.push_str(&format!("<li><a href=\"{}\">../</a></li>", parent_path));
+        }
+
+        let mut entries_vec = Vec::new();
+        for entry in entries {
+            if let Ok(entry) = entry {
+                entries_vec.push(entry);
+            }
+        }
+        // Sort entries by name
+        entries_vec.sort_by_key(|e| e.file_name());
+
+        for entry in entries_vec {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                let display_name = if is_dir { format!("{}/", file_name) } else { file_name.clone() };
+                
+                // Construct relative link
+                // If req_path ends with /, append file_name
+                // Else append /file_name
+                let link = if req_path.ends_with('/') {
+                    format!("{}{}", req_path, file_name)
+                } else {
+                    format!("{}/{}", req_path, file_name)
+                };
+
+                html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", link, display_name));
+            }
+        }
+
+        html.push_str("</ul></body></html>");
+        Ok(html)
+    }
+
     fn queue_error(
         conn: &mut HttpConnection,
         registry: &mio::Registry,
@@ -257,20 +323,16 @@ impl Server {
 
         // Resolve config to check for custom error pages
         let config = conn.resolve_config();
-
+        println!("{:?}", config.error_pages);
         let body = if let Some(path) = config.error_pages.get(&status_code) {
-            std::fs::read_to_string(path)
+            std::fs::read_to_string("./errors/".to_string()+path)
                 .unwrap_or_else(|_| format!("<h1>{} {}</h1>", status_code, error_msg))
         } else {
             format!("<h1>{} {}</h1>", status_code, error_msg)
         };
 
         let response = format!(
-            "HTTP/1.1 {} {}
-Content-Length: {}
-Connection: close
-
-{}",
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             status_code,
             error_msg,
             body.len(),
@@ -312,22 +374,21 @@ Connection: close
             Self::queue_error(conn, registry, token, 405);
             return Ok(());
         }
-        if route.redirection.is_some() {
+        if let Some(redirection_url) = &route.redirection {
             let response = format!(
-                "HTTP/1.1 301 Moved Permanently
-Location: {}
-Connection: close
-
-",
-                route.redirection.as_ref().unwrap()
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                redirection_url
             );
             conn.write_buffer.extend_from_slice(response.as_bytes());
+            conn.is_closing = true;
         } else {
             // 3. Simple GET implementation (Static Files)
             if method == "GET" {
-                let full_path;
-                if !route.default_file.is_empty() && path == route.path {
-                    full_path = format!("{}/{}", route.root, route.default_file);
+                let mut full_path;
+                if path == route.path && !route.default_file.is_empty() {
+                     // Special case for root exact match if default file exists at root
+                     // Actually, logic is: Root + (path - route.path).
+                     full_path = format!("{}/", route.root);
                 } else {
                     full_path = format!(
                         "{}/{}",
@@ -335,17 +396,63 @@ Connection: close
                         path.strip_prefix(&route.path).unwrap_or("")
                     );
                 }
-                println!("Serving file: {}", full_path);
-                match std::fs::read(&full_path) {
-                    Ok(content) => {
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                            content.len()
-                        );
-                        conn.write_buffer.extend_from_slice(response.as_bytes());
-                        conn.write_buffer.extend_from_slice(&content);
-                    }
-                    Err(_err) => {
+                
+                // Clean up double slashes just in case
+                full_path = full_path.replace("//", "/");
+
+                let metadata = std::fs::metadata(&full_path);
+                
+                match metadata {
+                    Ok(md) => {
+                        if md.is_dir() {
+                            // Directory handling
+                            let index_path = format!("{}/{}", full_path, route.default_file);
+                            if !route.default_file.is_empty() && std::path::Path::new(&index_path).exists() {
+                                // Serve index file
+                                full_path = index_path;
+                                // Fallthrough to file serving logic below
+                            } else if route.autoindex {
+                                // Serve Autoindex
+                                match Self::generate_autoindex_html(&full_path, &path) {
+                                    Ok(html) => {
+                                        let response = format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                                            html.len(),
+                                            html
+                                        );
+                                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                                        return Ok(());
+                                    },
+                                    Err(_) => {
+                                        Self::queue_error(conn, registry, token, 500);
+                                        return Ok(());
+                                    }
+                                }
+                            } else {
+                                // Forbidden (Directory listing disabled and no index file)
+                                Self::queue_error(conn, registry, token, 1000);
+                                return Ok(());
+                            }
+                        } 
+                        
+                        // File serving (or index file if fell through)
+                        println!("Serving file: {}", full_path);
+                        match std::fs::read(&full_path) {
+                            Ok(content) => {
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                    content.len()
+                                );
+                                conn.write_buffer.extend_from_slice(response.as_bytes());
+                                conn.write_buffer.extend_from_slice(&content);
+                            }
+                            Err(_) => {
+                                // Could happen if file permissions deny read
+                                Self::queue_error(conn, registry, token, 403);
+                            }
+                        }
+                    },
+                    Err(_) => {
                         Self::queue_error(conn, registry, token, 404);
                     }
                 }

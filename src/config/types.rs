@@ -20,7 +20,6 @@ pub struct RouteConfig {
     pub default_file: String,
     pub cgi_ext: Option<String>,
     pub autoindex: bool,
-    pub client_max_body_size: usize,
 }
 
 impl Default for RouteConfig {
@@ -33,7 +32,6 @@ impl Default for RouteConfig {
             default_file: DEFAULT_FILE.to_string(),
             cgi_ext: None,
             autoindex: false,
-            client_max_body_size: DEFAULT_MAX_BODY_SIZE,
         }
     }
 }
