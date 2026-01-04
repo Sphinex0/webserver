@@ -7,6 +7,7 @@ pub mod cgi;
 pub mod utils {
     pub mod cookie;
     pub mod session;
+    pub mod multipart;
 }
 
 pub mod lexer;

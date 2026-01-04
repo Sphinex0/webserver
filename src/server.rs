@@ -14,7 +14,7 @@ use mio::{
 
 use crate::{
     config::ServerConfig,
-    http_parser::{HttpRequest, ParsingState},
+    http_parser::{HttpRequest, ParsingState}, utils::multipart,
 };
 
 pub struct HttpConnection {
@@ -448,24 +448,99 @@ impl Server {
             .get("Content-Type")
             .map(|s| s.as_str())
             .unwrap_or("application/octet-stream");
-        
+
+        // Check for multipart
+        let boundary = content_type
+            .split("boundary=")
+            .nth(1)
+            .map(|b| b.trim())
+            .unwrap_or("");
+        if boundary != "" {
+            if !boundary.is_empty() {
+                println!("Handling Multipart Upload with boundary: {}", boundary);
+                let parts = multipart::parse_multipart(&conn.request.body, boundary);
+                let mut uploaded_count = 0;
+
+                for part in parts {
+                    if let Some(filename) = part.filename {
+                        if filename.is_empty() {
+                            continue;
+                        }
+
+                        // Construct path
+                        // Security check: strip directory components to prevent path traversal
+                        let safe_filename = std::path::Path::new(&filename)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "unknown_{}",
+                                    SystemTime::now()
+                                        .duration_since(SystemTime::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_nanos()
+                                )
+                            });
+
+                        let mut upload_path = std::path::PathBuf::from(&route.root);
+                        upload_path.push(&safe_filename);
+
+                        // Ensure parent directory exists
+                        if let Some(parent) = upload_path.parent() {
+                            if !parent.exists() {
+                                if let Err(_) = std::fs::create_dir_all(parent) {
+                                    Self::queue_error(conn, registry, token, 500);
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        println!("Saving multipart file: {:?}", upload_path);
+                        match File::create(&upload_path) {
+                            Ok(mut file) => {
+                                if let Err(_) = file.write_all(&part.body) {
+                                    Self::queue_error(conn, registry, token, 500);
+                                    return Ok(());
+                                }
+                                uploaded_count += 1;
+                            }
+                            Err(_) => {
+                                Self::queue_error(conn, registry, token, 500);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                let response_body = format!("Uploaded {} files successfully", uploaded_count);
+                let response = format!(
+                    "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                conn.write_buffer.extend_from_slice(response.as_bytes());
+                return Ok(());
+            }
+        }
+
+        // Fallback to raw body upload (previous behavior)
         let extension = Self::get_ext_from_content_type(content_type);
-        
+
         // Generate a unique filename
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos(); // Use nanos for better uniqueness
         let filename = format!("upload_{}{}", timestamp, extension);
-        
+
         // Construct the full path using PathBuf for safety
         let mut upload_path = std::path::PathBuf::from(&route.root);
-        
+
         // If the route has a dedicated upload directory defined (not part of RouteConfig yet, but we can assume root for now or check if root is a dir)
-        // For now, we write to route.root. 
+        // For now, we write to route.root.
         // Ideally, we might want to preserve the request path structure, but standard POST uploads often go to a specific store.
         // Let's stick to the user's logic of "root + generated name".
-        
+
         upload_path.push(filename);
 
         println!("Uploading to: {:?}", upload_path);
@@ -473,33 +548,31 @@ impl Server {
         // Ensure parent directory exists (though route.root should exist)
         if let Some(parent) = upload_path.parent() {
             if !parent.exists() {
-                 // Try to create it? Or fail? 
-                 // If route.root points to a non-existent dir, we might want to create it.
-                 if let Err(_) = std::fs::create_dir_all(parent) {
-                     Self::queue_error(conn, registry, token, 500);
-                     return Ok(());
-                 }
+                // Try to create it? Or fail?
+                // If route.root points to a non-existent dir, we might want to create it.
+                if let Err(_) = std::fs::create_dir_all(parent) {
+                    Self::queue_error(conn, registry, token, 500);
+                    return Ok(());
+                }
             }
         }
 
         match File::create(&upload_path) {
-            Ok(mut file) => {
-                match file.write_all(&conn.request.body) {
-                    Ok(_) => {
-                        let response_body = "File uploaded successfully";
-                        let response = format!(
+            Ok(mut file) => match file.write_all(&conn.request.body) {
+                Ok(_) => {
+                    let response_body = "File uploaded successfully";
+                    let response = format!(
                             "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nLocation: {}\r\nConnection: keep-alive\r\n\r\n{}",
                             response_body.len(),
                             upload_path.file_name().unwrap().to_string_lossy(),
                             response_body
                         );
-                        conn.write_buffer.extend_from_slice(response.as_bytes());
-                    }
-                    Err(_) => {
-                        Self::queue_error(conn, registry, token, 500);
-                    }
+                    conn.write_buffer.extend_from_slice(response.as_bytes());
                 }
-            }
+                Err(_) => {
+                    Self::queue_error(conn, registry, token, 500);
+                }
+            },
             Err(_) => {
                 // Failed to create file (permissions, etc.)
                 Self::queue_error(conn, registry, token, 500);
