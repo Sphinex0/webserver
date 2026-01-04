@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, fs::ReadDir};
 use crate::config::types::ServerConfig;
 
 pub fn validate_configs(configs: Vec<ServerConfig>) -> Vec<ServerConfig> {
@@ -53,7 +53,45 @@ pub fn validate_configs(configs: Vec<ServerConfig>) -> Vec<ServerConfig> {
         }
     }
 
-    // 4. Filter valid configs
+    // 4. Validate File Paths and Status Codes
+    for (idx, config) in configs.iter().enumerate() {
+        let mut valid = true;
+
+        // Check Error Pages
+        for (code, path) in &config.error_pages {
+            if *code < 100 || *code > 599 {
+                println!(
+                    "❌ \x1b[1;31mInvalid Status Code:\x1b[0m Server '{}' has invalid error page code {}. Must be between 100 and 599.",
+                    config.server_name, code
+                );
+                valid = false;
+            }
+            if let Err(e) = std::fs::File::open(path) {
+                println!(
+                    "❌ \x1b[1;31mFile Error:\x1b[0m Server '{}' refers to error page '{}' for code {}: {}.",
+                    config.server_name, path, code, e
+                );
+                valid = false;
+            }
+        }
+
+        // Check Routes
+        for route in &config.routes {
+            if let Err(e) = std::fs::read_dir(&route.root) {
+                println!(
+                    "❌ \x1b[1;31mDirectory Error:\x1b[0m Server '{}' route '{}' refers to invalid root directory '{}': {}.",
+                    config.server_name, route.path, route.root, e
+                );
+                valid = false;
+            }
+        }
+
+        if !valid {
+            conflict_indices.insert(idx);
+        }
+    }
+
+    // 5. Filter valid configs
     for (idx, config) in configs.into_iter().enumerate() {
         if !conflict_indices.contains(&idx) {
             valid_configs.push(config);
@@ -152,5 +190,61 @@ mod tests {
         ];
         let valid = validate_configs(configs);
         assert_eq!(valid.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_invalid_status_code() {
+        let mut config = make_config("127.0.0.1", vec![8080], "s1");
+        config.error_pages.insert(99, "exists".to_string()); // Invalid code
+        
+        // Mock existence of file (not really possible without creating it, 
+        // but let's assume the status code check happens first or independently)
+        // Actually valid=false logic accumulates.
+        
+        let valid = validate_configs(vec![config]);
+        assert_eq!(valid.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_missing_files() {
+        let mut config = make_config("127.0.0.1", vec![8080], "s1");
+        config.error_pages.insert(404, "/non/existent/path/err.html".to_string());
+        
+        let valid = validate_configs(vec![config]);
+        assert_eq!(valid.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_missing_root() {
+        use crate::config::types::RouteConfig;
+        let mut config = make_config("127.0.0.1", vec![8080], "s1");
+        let mut route = RouteConfig::default();
+        route.root = "/non/existent/dir".to_string();
+        config.routes.push(route);
+        
+        let valid = validate_configs(vec![config]);
+        assert_eq!(valid.len(), 0);
+    }
+
+    #[test]
+    fn test_validate_valid_files() {
+        use crate::config::types::RouteConfig;
+        // Create temp things
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_err.html");
+        std::fs::write(&file_path, "error").unwrap();
+        
+        let mut config = make_config("127.0.0.1", vec![8080], "s1");
+        config.error_pages.insert(404, file_path.to_str().unwrap().to_string());
+        
+        let mut route = RouteConfig::default();
+        route.root = temp_dir.to_str().unwrap().to_string(); // Temp dir exists
+        config.routes.push(route);
+        
+        let valid = validate_configs(vec![config]);
+        assert_eq!(valid.len(), 1);
+        
+        // Cleanup
+        let _ = std::fs::remove_file(file_path);
     }
 }

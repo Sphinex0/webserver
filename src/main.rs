@@ -11,6 +11,10 @@ fn main() -> io::Result<()> {
 
     // 2. Validate Configuration
     let valid_servers = validate_configs(config.servers);
+    if valid_servers.is_empty() {
+        eprintln!("❌ \x1b[1;31mCritical Error\x1b[0m: No valid server configurations remain after validation. Exiting.");
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "No valid server configurations"));
+    }
 
     // 3. Display Configuration Summary
     display_config(&valid_servers);

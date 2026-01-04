@@ -1,0 +1,6 @@
+--------------------------86762c844d6ad8eb
+Content-Disposition: form-data; name="file"; filename="data.json"
+Content-Type: application/octet-stream
+
+{"name":"testtttt","value":123}
+--------------------------86762c844d6ad8eb--

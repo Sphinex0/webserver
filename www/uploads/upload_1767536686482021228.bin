@@ -1,0 +1,6 @@
+--------------------------f3e30f18d71af349
+Content-Disposition: attachment; name="file"; filename="data.json"
+Content-Type: application/octet-stream
+
+{"name":"testtttt","value":123}
+--------------------------f3e30f18d71af349--

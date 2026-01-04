@@ -3,13 +3,19 @@ servers:
     ports: [8080]
     server_name: "proxy.local"  
     client_max_body_size: 1024
-      
+    error_pages: 
+      404: "./errors/404.html"
     routes: 
      - path: "/"
        root: "./www/html"
+       methods: ["GET"]
        autoindex: true
       #  default_file: "index.html"
       #  redirection: "http://google.com"
+     - path: "/upload"
+       root: "./www/uploads"
+       methods: ["GET", "POST"]
+       autoindex: true
 
 
   - host: "127.0.0.2"

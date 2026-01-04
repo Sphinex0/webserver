@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    fs::File,
     io::{self, ErrorKind, Read, Write},
     sync::Arc,
+    time::SystemTime,
 };
 
 use mio::{
@@ -178,6 +180,7 @@ impl Server {
             loop {
                 match conn.stream.read(&mut stack_buf) {
                     Ok(0) => {
+                        println!("11111111111111111111");
                         conn.is_closing = true;
                         break;
                     }
@@ -188,23 +191,28 @@ impl Server {
                                 // Check Content-Length as soon as headers are available (or body accumulation starts)
                                 // We need to resolve config now to check limits
                                 let config = conn.resolve_config();
-                                
+
                                 let max_size = config.client_max_body_size;
 
                                 // Check Content-Length Header
                                 if let Some(cl_str) = conn.request.headers.get("Content-Length") {
                                     if let Ok(cl) = cl_str.parse::<usize>() {
                                         if cl > max_size {
-                                            Self::queue_error(conn, self.poll.registry(), token, 413);
+                                            Self::queue_error(
+                                                conn,
+                                                self.poll.registry(),
+                                                token,
+                                                413,
+                                            );
                                             break;
                                         }
                                     }
                                 }
-                                
+
                                 // Also check actual buffered size just in case (defense in depth)
                                 if conn.request.body.len() + conn.request.buffer.len() > max_size {
-                                     Self::queue_error(conn, self.poll.registry(), token, 413);
-                                     break;
+                                    Self::queue_error(conn, self.poll.registry(), token, 413);
+                                    break;
                                 }
 
                                 if conn.request.state == ParsingState::Complete {
@@ -258,6 +266,7 @@ impl Server {
         }
 
         if conn.is_closing && conn.write_buffer.is_empty() {
+            println!("drop");
             self.connections.remove(&token);
         }
 
@@ -271,7 +280,11 @@ impl Server {
 
         // Add parent directory link if not root
         if req_path != "/" {
-            let parent_path = std::path::Path::new(req_path).parent().unwrap_or(std::path::Path::new("/")).to_str().unwrap_or("/");
+            let parent_path = std::path::Path::new(req_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("/"))
+                .to_str()
+                .unwrap_or("/");
             html.push_str(&format!("<li><a href=\"{}\">../</a></li>", parent_path));
         }
 
@@ -287,8 +300,12 @@ impl Server {
         for entry in entries_vec {
             if let Ok(file_name) = entry.file_name().into_string() {
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                let display_name = if is_dir { format!("{}/", file_name) } else { file_name.clone() };
-                
+                let display_name = if is_dir {
+                    format!("{}/", file_name)
+                } else {
+                    file_name.clone()
+                };
+
                 // Construct relative link
                 // If req_path ends with /, append file_name
                 // Else append /file_name
@@ -298,7 +315,10 @@ impl Server {
                     format!("{}/{}", req_path, file_name)
                 };
 
-                html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", link, display_name));
+                html.push_str(&format!(
+                    "<li><a href=\"{}\">{}</a></li>",
+                    link, display_name
+                ));
             }
         }
 
@@ -323,9 +343,9 @@ impl Server {
 
         // Resolve config to check for custom error pages
         let config = conn.resolve_config();
-        println!("{:?}", config.error_pages);
+
         let body = if let Some(path) = config.error_pages.get(&status_code) {
-            std::fs::read_to_string("./errors/".to_string()+path)
+            std::fs::read_to_string(path)
                 .unwrap_or_else(|_| format!("<h1>{} {}</h1>", status_code, error_msg))
         } else {
             format!("<h1>{} {}</h1>", status_code, error_msg)
@@ -374,6 +394,8 @@ impl Server {
             Self::queue_error(conn, registry, token, 405);
             return Ok(());
         }
+
+        // 3. Handle Redirection
         if let Some(redirection_url) = &route.redirection {
             let response = format!(
                 "HTTP/1.1 301 Moved Permanently\r\nLocation: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
@@ -381,85 +403,29 @@ impl Server {
             );
             conn.write_buffer.extend_from_slice(response.as_bytes());
             conn.is_closing = true;
-        } else {
-            // 3. Simple GET implementation (Static Files)
-            if method == "GET" {
-                let mut full_path;
-                if path == route.path && !route.default_file.is_empty() {
-                     // Special case for root exact match if default file exists at root
-                     // Actually, logic is: Root + (path - route.path).
-                     full_path = format!("{}/", route.root);
-                } else {
-                    full_path = format!(
-                        "{}/{}",
-                        route.root,
-                        path.strip_prefix(&route.path).unwrap_or("")
-                    );
-                }
-                
-                // Clean up double slashes just in case
-                full_path = full_path.replace("//", "/");
 
-                let metadata = std::fs::metadata(&full_path);
-                
-                match metadata {
-                    Ok(md) => {
-                        if md.is_dir() {
-                            // Directory handling
-                            let index_path = format!("{}/{}", full_path, route.default_file);
-                            if !route.default_file.is_empty() && std::path::Path::new(&index_path).exists() {
-                                // Serve index file
-                                full_path = index_path;
-                                // Fallthrough to file serving logic below
-                            } else if route.autoindex {
-                                // Serve Autoindex
-                                match Self::generate_autoindex_html(&full_path, &path) {
-                                    Ok(html) => {
-                                        let response = format!(
-                                            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                                            html.len(),
-                                            html
-                                        );
-                                        conn.write_buffer.extend_from_slice(response.as_bytes());
-                                        return Ok(());
-                                    },
-                                    Err(_) => {
-                                        Self::queue_error(conn, registry, token, 500);
-                                        return Ok(());
-                                    }
-                                }
-                            } else {
-                                // Forbidden (Directory listing disabled and no index file)
-                                Self::queue_error(conn, registry, token, 1000);
-                                return Ok(());
-                            }
-                        } 
-                        
-                        // File serving (or index file if fell through)
-                        println!("Serving file: {}", full_path);
-                        match std::fs::read(&full_path) {
-                            Ok(content) => {
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                                    content.len()
-                                );
-                                conn.write_buffer.extend_from_slice(response.as_bytes());
-                                conn.write_buffer.extend_from_slice(&content);
-                            }
-                            Err(_) => {
-                                // Could happen if file permissions deny read
-                                Self::queue_error(conn, registry, token, 403);
-                            }
-                        }
-                    },
-                    Err(_) => {
-                        Self::queue_error(conn, registry, token, 404);
-                    }
-                }
-            }
+            // Finalize
+            registry.reregister(
+                &mut conn.stream,
+                token,
+                Interest::READABLE.add(Interest::WRITABLE),
+            )?;
+            return Ok(());
         }
 
-        // 4. POST and DELETE logic would go here
+        // 4. Method Dispatch
+        match method.as_str() {
+            "GET" => Self::handle_get(conn, registry, token, route, &path)?,
+            "POST" => Self::handle_post(conn, registry, token, route)?,
+            "DELETE" => {
+                // Placeholder for DELETE
+            }
+            _ => {
+                // Should have been caught by method check, but safe fallback
+                Self::queue_error(conn, registry, token, 405);
+                return Ok(());
+            }
+        }
 
         registry.reregister(
             &mut conn.stream,
@@ -467,6 +433,180 @@ impl Server {
             Interest::READABLE.add(Interest::WRITABLE),
         )?;
 
+        Ok(())
+    }
+
+    fn handle_post(
+        conn: &mut HttpConnection,
+        registry: &mio::Registry,
+        token: Token,
+        route: &crate::config::RouteConfig,
+    ) -> io::Result<()> {
+        let content_type = conn
+            .request
+            .headers
+            .get("Content-Type")
+            .map(|s| s.as_str())
+            .unwrap_or("application/octet-stream");
+        
+        let extension = Self::get_ext_from_content_type(content_type);
+        
+        // Generate a unique filename
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(); // Use nanos for better uniqueness
+        let filename = format!("upload_{}{}", timestamp, extension);
+        
+        // Construct the full path using PathBuf for safety
+        let mut upload_path = std::path::PathBuf::from(&route.root);
+        
+        // If the route has a dedicated upload directory defined (not part of RouteConfig yet, but we can assume root for now or check if root is a dir)
+        // For now, we write to route.root. 
+        // Ideally, we might want to preserve the request path structure, but standard POST uploads often go to a specific store.
+        // Let's stick to the user's logic of "root + generated name".
+        
+        upload_path.push(filename);
+
+        println!("Uploading to: {:?}", upload_path);
+
+        // Ensure parent directory exists (though route.root should exist)
+        if let Some(parent) = upload_path.parent() {
+            if !parent.exists() {
+                 // Try to create it? Or fail? 
+                 // If route.root points to a non-existent dir, we might want to create it.
+                 if let Err(_) = std::fs::create_dir_all(parent) {
+                     Self::queue_error(conn, registry, token, 500);
+                     return Ok(());
+                 }
+            }
+        }
+
+        match File::create(&upload_path) {
+            Ok(mut file) => {
+                match file.write_all(&conn.request.body) {
+                    Ok(_) => {
+                        let response_body = "File uploaded successfully";
+                        let response = format!(
+                            "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nLocation: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                            response_body.len(),
+                            upload_path.file_name().unwrap().to_string_lossy(),
+                            response_body
+                        );
+                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                    }
+                    Err(_) => {
+                        Self::queue_error(conn, registry, token, 500);
+                    }
+                }
+            }
+            Err(_) => {
+                // Failed to create file (permissions, etc.)
+                Self::queue_error(conn, registry, token, 500);
+            }
+        }
+        Ok(())
+    }
+
+    fn get_ext_from_content_type(content_type: &str) -> &str {
+        match content_type {
+            "application/json" => ".json",
+            "application/pdf" => ".pdf",
+            "application/xml" => ".xml",
+            "application/zip" => ".zip",
+            "audio/mpeg" => ".mp3",
+            "image/gif" => ".gif",
+            "image/jpeg" => ".jpg",
+            "image/png" => ".png",
+            "image/svg+xml" => ".svg",
+            "image/webp" => ".webp",
+            "text/css" => ".css",
+            "text/html" => ".html",
+            "text/javascript" => ".js",
+            "text/plain" => ".txt",
+            "video/mp4" => ".mp4",
+            _ => ".bin",
+        }
+    }
+
+    fn handle_get(
+        conn: &mut HttpConnection,
+        registry: &mio::Registry,
+        token: Token,
+        route: &crate::config::RouteConfig,
+        path: &str,
+    ) -> io::Result<()> {
+        let mut full_path;
+        if path == route.path && !route.default_file.is_empty() {
+            full_path = format!("{}/", route.root);
+        } else {
+            full_path = format!(
+                "{}/{}",
+                route.root,
+                path.strip_prefix(&route.path).unwrap_or("")
+            );
+        }
+
+        // Clean up double slashes just in case
+        full_path = full_path.replace("//", "/");
+
+        let metadata = std::fs::metadata(&full_path);
+        match metadata {
+            Ok(md) => {
+                let mut serve_file = false;
+                if md.is_dir() {
+                    // Directory handling
+                    let index_path = format!("{}/{}", full_path, route.default_file);
+                    if !route.default_file.is_empty() && std::path::Path::new(&index_path).exists()
+                    {
+                        // Serve index file
+                        full_path = index_path;
+                        serve_file = true;
+                    } else if route.autoindex {
+                        // Serve Autoindex
+                        match Self::generate_autoindex_html(&full_path, &path) {
+                            Ok(html) => {
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                                    html.len(),
+                                    html
+                                );
+                                conn.write_buffer.extend_from_slice(response.as_bytes());
+                            }
+                            Err(_) => {
+                                Self::queue_error(conn, registry, token, 500);
+                            }
+                        }
+                    } else {
+                        // Forbidden (Directory listing disabled and no index file)
+                        Self::queue_error(conn, registry, token, 403);
+                    }
+                } else {
+                    serve_file = true;
+                }
+
+                if serve_file {
+                    println!("Serving file: {}", full_path);
+                    match std::fs::read(&full_path) {
+                        Ok(content) => {
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                                content.len()
+                            );
+                            conn.write_buffer.extend_from_slice(response.as_bytes());
+                            conn.write_buffer.extend_from_slice(&content);
+                        }
+                        Err(_) => {
+                            // Could happen if file permissions deny read
+                            Self::queue_error(conn, registry, token, 403);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                Self::queue_error(conn, registry, token, 404);
+            }
+        }
         Ok(())
     }
 }
