@@ -6,6 +6,8 @@ pub enum ParsingState {
     RequestLine,
     Headers,
     Body(usize), // Content-Length
+    // ChunkSize,
+    // ChunkBody(usize),
     Complete,
     Error,
 }
@@ -90,12 +92,12 @@ impl HttpRequest {
                     }
 
                     // println!("Parsed header: {key}: {value}");
-                    self.headers.insert(key, value);
+                    self.headers.insert(key.to_lowercase(), value);
                 }
                 None => {
                     let content_length = self
                         .headers
-                        .get("Content-Length")
+                        .get("content-length")
                         .and_then(|val| val.parse::<usize>().ok())
                         .unwrap_or(0);
 

@@ -16,6 +16,10 @@ servers:
        root: "./www/uploads"
        methods: ["GET", "POST"]
        autoindex: true
+     - path: "/delete/"
+       root: "./www/uploads"
+       methods: ["DELETE"]
+       autoindex: true
 
 
   - host: "127.0.0.2"

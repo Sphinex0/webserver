@@ -20,7 +20,6 @@ impl Router {
     }
 
     pub fn handle(&self, request: &HttpRequest) -> String {
-        // println!("{}",request.path);
         match self.routes.get(&request.path) {
             Some(handler) => handler(request),
             None => "HTTP/1.1 404 NOT FOUND\r\nContent-Length: 9\r\n\r\nNot Found".to_string()

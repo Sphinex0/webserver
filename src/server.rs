@@ -40,7 +40,7 @@ impl HttpConnection {
     /// Resolves the correct configuration based on the Host header.
     /// Defaults to the first candidate (or the one marked default_server) if no match.
     pub fn resolve_config(&self) -> Arc<ServerConfig> {
-        if let Some(host_header) = self.request.headers.get("Host") {
+        if let Some(host_header) = self.request.headers.get("host") {
             // Host header might be "example.com:8080", we usually just care about the name "example.com"
             // but strict matching might require checking the port too.
             // For now, let's split off the port if present.
@@ -180,13 +180,14 @@ impl Server {
             loop {
                 match conn.stream.read(&mut stack_buf) {
                     Ok(0) => {
-                        println!("11111111111111111111");
                         conn.is_closing = true;
                         break;
                     }
                     Ok(n) => {
                         conn.request.append_data(&stack_buf[..n]);
-                        match conn.request.parse() {
+                        let parse_result = conn.request.parse();
+                        println!("Parse result: {:?}", parse_result);
+                        match parse_result {
                             Ok(ParsingState::Body(_)) | Ok(ParsingState::Complete) => {
                                 // Check Content-Length as soon as headers are available (or body accumulation starts)
                                 // We need to resolve config now to check limits
@@ -195,7 +196,7 @@ impl Server {
                                 let max_size = config.client_max_body_size;
 
                                 // Check Content-Length Header
-                                if let Some(cl_str) = conn.request.headers.get("Content-Length") {
+                                if let Some(cl_str) = conn.request.headers.get("content-length") {
                                     if let Ok(cl) = cl_str.parse::<usize>() {
                                         if cl > max_size {
                                             Self::queue_error(
@@ -417,9 +418,7 @@ impl Server {
         match method.as_str() {
             "GET" => Self::handle_get(conn, registry, token, route, &path)?,
             "POST" => Self::handle_post(conn, registry, token, route)?,
-            "DELETE" => {
-                // Placeholder for DELETE
-            }
+            "DELETE" => Self::handle_delete(conn, registry, token, route, &path)?,
             _ => {
                 // Should have been caught by method check, but safe fallback
                 Self::queue_error(conn, registry, token, 405);
@@ -436,6 +435,51 @@ impl Server {
         Ok(())
     }
 
+    fn handle_delete(
+        conn: &mut HttpConnection,
+        registry: &mio::Registry,
+        token: Token,
+        route: &crate::config::RouteConfig,
+        path: &str,
+    ) -> io::Result<()> {
+        let mut full_path;
+        if path == route.path && !route.default_file.is_empty() {
+            full_path = format!("{}/", route.root);
+        } else {
+            full_path = format!(
+                "{}/{}",
+                route.root,
+                path.strip_prefix(&route.path).unwrap_or("")
+            );
+        }
+        
+        // Clean up double slashes just in case
+        full_path = full_path.replace("//", "/");
+        
+        println!("Deleting file: {}", full_path);
+        
+        if std::path::Path::new(&full_path).exists() {
+            if std::fs::metadata(&full_path).map(|m| m.is_dir()).unwrap_or(false) {
+                 // Directory deletion forbidden
+                 Self::queue_error(conn, registry, token, 403);
+            } else {
+                match std::fs::remove_file(&full_path) {
+                    Ok(_) => {
+                        let response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                        conn.is_closing = true;
+                    }
+                    Err(_) => {
+                        Self::queue_error(conn, registry, token, 403); // Forbidden or Locked
+                    }
+                }
+            }
+        } else {
+            Self::queue_error(conn, registry, token, 404);
+        }
+        Ok(())
+    }
+
     fn handle_post(
         conn: &mut HttpConnection,
         registry: &mio::Registry,
@@ -445,7 +489,7 @@ impl Server {
         let content_type = conn
             .request
             .headers
-            .get("Content-Type")
+            .get("content-type")
             .map(|s| s.as_str())
             .unwrap_or("application/octet-stream");
 
@@ -455,64 +499,94 @@ impl Server {
             .nth(1)
             .map(|b| b.trim())
             .unwrap_or("");
+        dbg!(&conn.request.headers);
+        dbg!(String::from_utf8(conn.request.body.clone()).unwrap());
         if boundary != "" {
             if !boundary.is_empty() {
                 println!("Handling Multipart Upload with boundary: {}", boundary);
                 let parts = multipart::parse_multipart(&conn.request.body, boundary);
                 let mut uploaded_count = 0;
 
+                let mut uploaded_files = Vec::new();
+
                 for part in parts {
-                    if let Some(filename) = part.filename {
-                        if filename.is_empty() {
-                            continue;
+                    // Determine filename behavior:
+                    // 1. Missing 'filename' attribute -> Skip (likely a regular form field)
+                    // 2. Empty 'filename' value ("") -> Generate a unique name
+                    // 3. Provided 'filename' -> Use it
+                    let mut filename = match part.filename {
+                        None => continue, // Case 1: Skip
+                        Some(f) if f.is_empty() => {
+                            // Case 2: Generate
+                            let ext = part.content_type.as_deref()
+                                .map(Self::get_ext_from_content_type)
+                                .unwrap_or(".bin");
+                            format!("upload_{}{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(), ext)
                         }
+                        Some(f) => f, // Case 3: Use provided
+                    };
 
-                        // Construct path
-                        // Security check: strip directory components to prevent path traversal
-                        let safe_filename = std::path::Path::new(&filename)
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| {
-                                format!(
-                                    "unknown_{}",
-                                    SystemTime::now()
-                                        .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_nanos()
-                                )
-                            });
+                    // Construct path and sanitize
+                    let mut safe_filename = std::path::Path::new(&filename)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or(filename.clone()); 
 
-                        let mut upload_path = std::path::PathBuf::from(&route.root);
-                        upload_path.push(&safe_filename);
+                    let mut upload_path = std::path::PathBuf::from(&route.root);
+                    upload_path.push(&safe_filename);
 
-                        // Ensure parent directory exists
-                        if let Some(parent) = upload_path.parent() {
-                            if !parent.exists() {
-                                if let Err(_) = std::fs::create_dir_all(parent) {
-                                    Self::queue_error(conn, registry, token, 500);
-                                    return Ok(());
-                                }
-                            }
+                    // Handle duplicates by renaming (file.txt -> file(1).txt)
+                    if upload_path.exists() {
+                        let stem = std::path::Path::new(&safe_filename)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&safe_filename)
+                            .to_string();
+                        let extension = std::path::Path::new(&safe_filename)
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|e| format!(".{}", e))
+                            .unwrap_or_default();
+                        
+                        let mut counter = 1;
+                        while upload_path.exists() {
+                            safe_filename = format!("{}({}){}", stem, counter, extension);
+                            upload_path = std::path::PathBuf::from(&route.root);
+                            upload_path.push(&safe_filename);
+                            counter += 1;
                         }
+                        // Update filename to the resolved unique name
+                        filename = safe_filename; 
+                    }
 
-                        println!("Saving multipart file: {:?}", upload_path);
-                        match File::create(&upload_path) {
-                            Ok(mut file) => {
-                                if let Err(_) = file.write_all(&part.body) {
-                                    Self::queue_error(conn, registry, token, 500);
-                                    return Ok(());
-                                }
-                                uploaded_count += 1;
-                            }
-                            Err(_) => {
+                    // Ensure parent directory exists
+                    if let Some(parent) = upload_path.parent() {
+                        if !parent.exists() {
+                            if let Err(_) = std::fs::create_dir_all(parent) {
                                 Self::queue_error(conn, registry, token, 500);
                                 return Ok(());
                             }
                         }
                     }
+
+                    println!("Saving multipart file: {:?}", upload_path);
+                    match File::create(&upload_path) {
+                        Ok(mut file) => {
+                            if let Err(_) = file.write_all(&part.body) {
+                                Self::queue_error(conn, registry, token, 500);
+                                return Ok(());
+                            }
+                            uploaded_count += 1;
+                            uploaded_files.push(filename);
+                        }
+                        Err(_) => {
+                            Self::queue_error(conn, registry, token, 500);
+                            return Ok(());
+                        }
+                    }
                 }
 
-                let response_body = format!("Uploaded {} files successfully", uploaded_count);
+                let response_body = format!("Uploaded {} files successfully:\n{}", uploaded_count, uploaded_files.join("\n"));
                 let response = format!(
                     "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
                     response_body.len(),
