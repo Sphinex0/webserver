@@ -1,13 +1,13 @@
 use core::fmt;
 use std::{collections::HashMap, fmt::Display};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ParsingState {
     RequestLine,
     Headers,
-    Body(usize), // Content-Length
-    // ChunkSize,
-    // ChunkBody(usize),
+    Body { remaining: usize },
+    ChunkSize,
+    ChunkBody { remaining: usize },
     Complete,
     Error,
 }
@@ -17,7 +17,6 @@ pub struct HttpRequest {
     pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
     pub buffer: Vec<u8>,
 }
 
@@ -28,7 +27,6 @@ impl HttpRequest {
             method: String::new(),
             path: String::new(),
             headers: HashMap::new(),
-            body: Vec::new(),
             buffer: Vec::new(),
         }
     }
@@ -36,7 +34,7 @@ impl HttpRequest {
     pub fn clear(&mut self) {
         self.state = ParsingState::RequestLine;
         self.headers.clear();
-        self.body.clear();
+        // Buffer clearing is handled by consumption
     }
 
     pub fn append_data(&mut self, data: &[u8]) {
@@ -80,31 +78,34 @@ impl HttpRequest {
 
     fn parse_headers(&mut self) -> Result<(), &'static str> {
         loop {
-            // 8Kb max header size
-            if self.buffer.len() > 8 * 1024 {
-                return Err("header passed the maximum size");
-            }
-
             match extract_and_parse_header_line(&mut self.buffer)? {
                 Some((key, value)) => {
                     if key == "Incomplete" {
+                        // Header line incomplete. Check if buffer is already too large.
+                        if self.buffer.len() > 8 * 1024 {
+                            return Err("header passed the maximum size");
+                        }
                         return Err("Incomplete");
                     }
-
-                    // println!("Parsed header: {key}: {value}");
                     self.headers.insert(key.to_lowercase(), value);
                 }
                 None => {
-                    let content_length = self
-                        .headers
-                        .get("content-length")
-                        .and_then(|val| val.parse::<usize>().ok())
-                        .unwrap_or(0);
+                    let is_chunked = self.headers.get("transfer-encoding")
+                        .map(|v| v.to_lowercase().contains("chunked"))
+                        .unwrap_or(false);
 
-                    if content_length > 0 {
-                        self.state = ParsingState::Body(content_length);
+                    if is_chunked {
+                        self.state = ParsingState::ChunkSize;
                     } else {
-                        self.state = ParsingState::Complete;
+                        let content_length = self.headers.get("content-length")
+                            .and_then(|val| val.parse::<usize>().ok())
+                            .unwrap_or(0);
+
+                        if content_length > 0 {
+                            self.state = ParsingState::Body { remaining: content_length };
+                        } else {
+                            self.state = ParsingState::Complete;
+                        }
                     }
                     return Ok(());
                 }
@@ -112,15 +113,34 @@ impl HttpRequest {
         }
     }
 
-    pub fn parse(&mut self) -> Result<&ParsingState, &'static str> {
+    pub fn consume_body(&mut self, count: usize) {
+        if count > self.buffer.len() {
+            self.buffer.clear();
+        } else {
+            self.buffer.drain(..count);
+        }
+        
+        match self.state {
+            ParsingState::Body { remaining } => {
+                let new_remaining = remaining.saturating_sub(count);
+                self.state = ParsingState::Body { remaining: new_remaining };
+            }
+            ParsingState::ChunkBody { remaining } => {
+                let new_remaining = remaining.saturating_sub(count);
+                self.state = ParsingState::ChunkBody { remaining: new_remaining };
+            }
+            _ => {}
+        }
+    }
+
+    pub fn parse(&mut self) -> Result<ParsingState, &'static str> {
         loop {
             match self.state {
                 ParsingState::RequestLine => {
                     if let Err(err) = self.parse_request_line() {
                         if err.contains("Incomplete") {
-                            return Ok(&self.state);
+                            return Ok(self.state.clone());
                         }
-
                         self.state = ParsingState::Error;
                         return Err(err);
                     }
@@ -128,27 +148,63 @@ impl HttpRequest {
                 ParsingState::Headers => {
                     if let Err(err) = self.parse_headers() {
                         if err.contains("Incomplete") {
-
-                            return Ok(&self.state);
+                            return Ok(self.state.clone());
                         }
-
                         self.state = ParsingState::Error;
                         return Err(err);
                     }
-
-                    
                 }
-                ParsingState::Body(total_len) => {
-                    if self.buffer.len() >= total_len {
-                        let body_data: Vec<u8> = self.buffer.drain(..total_len).collect();
-                        self.body = body_data;
+                ParsingState::Body { remaining } => {
+                    if remaining == 0 {
                         self.state = ParsingState::Complete;
-                        return Ok(&self.state);
+                        return Ok(self.state.clone());
                     }
-                    // Still waiting for more data
-                    return Ok(&self.state);
+                    return Ok(self.state.clone());
                 },
-                ParsingState::Complete | ParsingState::Error => return Ok(&self.state),
+                ParsingState::ChunkSize => {
+                    if let Some(crlf_pos) = find_crlf(&self.buffer) {
+                        let line_bytes: Vec<u8> = self.buffer.drain(..crlf_pos + 2).collect();
+                        let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+                        let size_str = line.split(';').next().unwrap_or("").trim();
+                        
+                        match usize::from_str_radix(size_str, 16) {
+                            Ok(size) => {
+                                if size == 0 {
+                                    if self.buffer.starts_with(b"\r\n") {
+                                        self.buffer.drain(..2);
+                                    }
+                                    self.state = ParsingState::Complete;
+                                } else {
+                                    self.state = ParsingState::ChunkBody { remaining: size };
+                                }
+                            }
+                            Err(_) => {
+                                self.state = ParsingState::Error;
+                                return Err("Invalid chunk size");
+                            }
+                        }
+                    } else {
+                        return Ok(self.state.clone());
+                    }
+                },
+                ParsingState::ChunkBody { remaining } => {
+                    if remaining == 0 {
+                        if self.buffer.len() >= 2 {
+                            if &self.buffer[0..2] == b"\r\n" {
+                                self.buffer.drain(..2);
+                                self.state = ParsingState::ChunkSize;
+                            } else {
+                                self.state = ParsingState::Error;
+                                return Err("Invalid chunk format");
+                            }
+                        } else {
+                            return Ok(self.state.clone());
+                        }
+                    } else {
+                        return Ok(self.state.clone());
+                    }
+                },
+                ParsingState::Complete | ParsingState::Error => return Ok(self.state.clone()),
             }
         }
     }
@@ -213,16 +269,9 @@ impl Display for HttpRequest {
         }
 
         // 3. Body Summary
-        // We only print the body if it's UTF-8; otherwise, we show the byte count.
-        if !self.body.is_empty() {
-            writeln!(f, "Body ({} bytes):", self.body.len())?;
-            match String::from_utf8(self.body.clone()) {
-                Ok(s) => writeln!(f, "  {}", s)?,
-                Err(_) => writeln!(f, "  <binary data>")?,
-            }
-        } else {
-            writeln!(f, "Body: <empty>")?;
-        }
+        // Body is streamed, so we can't print it easily from here without consuming buffer.
+        // We'll just print buffer size.
+        writeln!(f, "Buffer ({} bytes)", self.buffer.len())?;
         writeln!(f, "--------------------")
     }
 }

@@ -14,16 +14,31 @@ use mio::{
 
 use crate::{
     config::ServerConfig,
-    http_parser::{HttpRequest, ParsingState}, utils::multipart,
+    http_parser::{HttpRequest, ParsingState},
+    utils::multipart,
 };
+
+enum BodyHandler {
+    None,
+    Buffer(Vec<u8>), // For small payloads or when buffering is required (e.g. headers incomplete)
+    File { file: File, path: std::path::PathBuf }, // For streaming raw uploads
+    Multipart { 
+        parser: multipart::MultipartParser, 
+        current_file: Option<File>, 
+        current_filename: Option<String>,
+        uploaded_files: Vec<String>,
+        upload_count: usize,
+    },
+}
 
 pub struct HttpConnection {
     stream: TcpStream,
     request: HttpRequest,
     write_buffer: Vec<u8>,
     is_closing: bool,
-    // Possible configurations for this connection (same Host:Port, different server_name)
     candidates: Vec<Arc<ServerConfig>>,
+    body_handler: BodyHandler,
+    current_route: Option<crate::config::RouteConfig>, // Cache resolved route
 }
 
 impl HttpConnection {
@@ -34,34 +49,27 @@ impl HttpConnection {
             write_buffer: Vec::new(),
             is_closing: false,
             candidates,
+            body_handler: BodyHandler::None,
+            current_route: None,
         }
     }
 
     /// Resolves the correct configuration based on the Host header.
-    /// Defaults to the first candidate (or the one marked default_server) if no match.
-    pub fn resolve_config(&self) -> Arc<ServerConfig> {
-        if let Some(host_header) = self.request.headers.get("host") {
-            // Host header might be "example.com:8080", we usually just care about the name "example.com"
-            // but strict matching might require checking the port too.
-            // For now, let's split off the port if present.
+    pub fn resolve_config_static(headers: &HashMap<String, String>, candidates: &[Arc<ServerConfig>]) -> Arc<ServerConfig> {
+        if let Some(host_header) = headers.get("host") {
             let hostname = host_header.split(':').next().unwrap_or("");
-
-            for config in &self.candidates {
+            for config in candidates {
                 if config.server_name == hostname {
                     return Arc::clone(config);
                 }
             }
         }
-
-        // If no match found, find the default_server, or fallback to the first one
-        for config in &self.candidates {
+        for config in candidates {
             if config.default_server {
                 return Arc::clone(config);
             }
         }
-
-        // Fallback to the first one
-        Arc::clone(&self.candidates[0])
+        Arc::clone(&candidates[0])
     }
 }
 
@@ -142,10 +150,6 @@ impl Server {
     fn handle_listener_event(&mut self, token: Token) -> io::Result<()> {
         // Get the specific listener and its candidates
         let (listener, candidates) = self.listeners.get(&token).unwrap();
-        // We can't clone candidates inside the match because we borrow listener.
-        // But we can clone the Arc list before looping or inside the loop if we are careful.
-        // Actually, Vec<Arc<...>> is cheap to clone.
-        // let candidates_clone = candidates.clone();
 
         loop {
             match listener.accept() {
@@ -176,7 +180,7 @@ impl Server {
         };
 
         if event.is_readable() {
-            let mut stack_buf = [0u8; 1024]; // Increased buffer size for efficiency
+            let mut stack_buf = [0u8; 65536]; // 64KB buffer
             loop {
                 match conn.stream.read(&mut stack_buf) {
                     Ok(0) => {
@@ -184,49 +188,151 @@ impl Server {
                         break;
                     }
                     Ok(n) => {
+                        println!("DEBUG: Read {} bytes", n);
                         conn.request.append_data(&stack_buf[..n]);
-                        let parse_result = conn.request.parse();
-                        println!("Parse result: {:?}", parse_result);
-                        match parse_result {
-                            Ok(ParsingState::Body(_)) | Ok(ParsingState::Complete) => {
-                                // Check Content-Length as soon as headers are available (or body accumulation starts)
-                                // We need to resolve config now to check limits
-                                let config = conn.resolve_config();
+                        
+                        // Parse Loop
+                        loop {
+                            let parse_result = conn.request.parse();
+                            match parse_result {
+                                Ok(ParsingState::Body { remaining }) | Ok(ParsingState::ChunkBody { remaining }) => {
+                                    // 1. Initialize Handler if None
+                                    if matches!(conn.body_handler, BodyHandler::None) {
+                                        // Resolve Route Early
+                                        let config = HttpConnection::resolve_config_static(&conn.request.headers, &conn.candidates);
+                                        let route = config.find_route(&conn.request.path).cloned(); // Clone route config
+                                        conn.current_route = route.clone();
+                                        
+                                        if let Some(r) = &route {
+                                            // Check limits
+                                            let max_size = config.client_max_body_size;
+                                            // Determine Content-Length if possible
+                                            let content_len = conn.request.headers.get("content-length")
+                                                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                                                
+                                            if content_len > max_size {
+                                                Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 413, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                break;
+                                            }
+                                            
+                                            // Decide Strategy
+                                            let method = conn.request.method.as_str();
+                                            let content_type = conn.request.headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+                                            
+                                            if method == "POST" && !content_type.starts_with("multipart/form-data") {
+                                                // Raw Upload -> Stream to File
+                                                // ... (existing raw upload logic)
+                                                let ext = Self::get_ext_from_content_type(content_type);
+                                                let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+                                                let filename = format!("upload_{}{}", timestamp, ext);
+                                                let mut path = std::path::PathBuf::from(&r.root);
+                                                path.push(filename);
+                                                
+                                                if let Some(p) = path.parent() { std::fs::create_dir_all(p).ok(); }
+                                                
+                                                println!("Streaming raw upload to: {:?}", path);
+                                                match File::create(&path) {
+                                                    Ok(f) => conn.body_handler = BodyHandler::File { file: f, path },
+                                                    Err(_) => {
+                                                        Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 500, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                        break;
+                                                    }
+                                                }
+                                            } else if method == "POST" && content_type.starts_with("multipart/form-data") {
+                                                // Streaming Multipart
+                                                let boundary = content_type
+                                                    .split("boundary=")
+                                                    .nth(1)
+                                                    .map(|b| b.trim().trim_matches('"'))
+                                                    .unwrap_or("");
+                                                
+                                                if boundary.is_empty() {
+                                                     Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 400, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                     break;
+                                                }
 
-                                let max_size = config.client_max_body_size;
-
-                                // Check Content-Length Header
-                                if let Some(cl_str) = conn.request.headers.get("content-length") {
-                                    if let Ok(cl) = cl_str.parse::<usize>() {
-                                        if cl > max_size {
-                                            Self::queue_error(
-                                                conn,
-                                                self.poll.registry(),
-                                                token,
-                                                413,
-                                            );
+                                                println!("Initializing Multipart Stream with boundary: {}", boundary);
+                                                conn.body_handler = BodyHandler::Multipart { 
+                                                    parser: multipart::MultipartParser::new(boundary),
+                                                    current_file: None,
+                                                    current_filename: None,
+                                                    uploaded_files: Vec::new(),
+                                                    upload_count: 0,
+                                                };
+                                            } else {
+                                                // Other -> Buffer (fallback)
+                                                conn.body_handler = BodyHandler::Buffer(Vec::new());
+                                            }
+                                        } else {
+                                            // No route? 404.
+                                            Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 404, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
                                             break;
                                         }
                                     }
+                                    
+                                    // 2. Stream Data
+                                    let available = conn.request.buffer.len();
+                                    let to_consume = std::cmp::min(available, remaining);
+                                    
+                                    if to_consume > 0 {
+                                        let data = &conn.request.buffer[..to_consume];
+                                        // Pre-calculate limit to avoid borrowing conn inside match
+                                        let limit = HttpConnection::resolve_config_static(&conn.request.headers, &conn.candidates).client_max_body_size;
+                                        
+                                        match &mut conn.body_handler {
+                                            BodyHandler::File { file, .. } => {
+                                                if let Err(_) = file.write_all(data) {
+                                                    Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 500, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                    break;
+                                                }
+                                            }
+                                            BodyHandler::Buffer(vec) => {
+                                                if vec.len() + data.len() > limit {
+                                                     Self::queue_error_static(self.poll.registry(), &mut conn.stream, token, 413, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                     break;
+                                                }
+                                                vec.extend_from_slice(data);
+                                            }
+                                            BodyHandler::Multipart { parser, current_file, current_filename, uploaded_files, upload_count } => {
+                                                let events = parser.process(data);
+                                                Self::handle_multipart_events(self.poll.registry(), token, events, current_file, current_filename, uploaded_files, upload_count, &mut conn.stream, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers, conn.current_route.as_ref().unwrap());
+                                            }
+                                            BodyHandler::None => {} 
+                                        }
+                                        
+                                        conn.request.consume_body(to_consume);
+                                    } else {
+                                        break; 
+                                    }
                                 }
+                                Ok(ParsingState::Complete) => {
+                                    // Finalize Body Handler if needed
+                                    if let BodyHandler::Multipart { ref mut parser, ref mut current_file, ref mut current_filename, ref mut uploaded_files, ref mut upload_count } = conn.body_handler {
+                                         let events = parser.finalize();
+                                         Self::handle_multipart_events(self.poll.registry(), token, events, current_file, current_filename, uploaded_files, upload_count, &mut conn.stream, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers, conn.current_route.as_ref().unwrap());
+                                    }
 
-                                // Also check actual buffered size just in case (defense in depth)
-                                if conn.request.body.len() + conn.request.buffer.len() > max_size {
-                                    Self::queue_error(conn, self.poll.registry(), token, 413);
-                                    break;
-                                }
-
-                                if conn.request.state == ParsingState::Complete {
+                                    // Finalize Request
                                     Self::process_request(conn, self.poll.registry(), token)?;
                                     conn.request.clear();
+                                    conn.body_handler = BodyHandler::None; // Reset
+                                    conn.current_route = None;
+                                    break;
+                                }
+                                Ok(_) => {
+                                    break;
+                                }
+                                Err(e) => {
+                                    // println!("DEBUG: Parser Error: {}", e);
+                                    conn.is_closing = true;
                                     break;
                                 }
                             }
-                            _ => {}
                         }
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                    Err(_) => {
+                    Err(e) => {
+                        // println!("DEBUG: Read Error: {}", e);
                         conn.is_closing = true;
                         break;
                     }
@@ -236,7 +342,6 @@ impl Server {
 
         if event.is_writable() {
             if !conn.write_buffer.is_empty() {
-                // We need to handle potential partial writes
                 match conn.stream.write(&conn.write_buffer) {
                     Ok(bytes_written) => {
                         conn.write_buffer.drain(..bytes_written);
@@ -246,16 +351,6 @@ impl Server {
                                 token,
                                 Interest::READABLE,
                             )?;
-                        }
-                        // Check pipeline processing
-                        if conn.write_buffer.is_empty() && !conn.request.buffer.is_empty() {
-                            match conn.request.parse() {
-                                Ok(ParsingState::Complete) => {
-                                    Self::process_request(conn, self.poll.registry(), token)?;
-                                    conn.request.clear();
-                                }
-                                _ => {}
-                            }
                         }
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
@@ -272,6 +367,103 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    fn handle_multipart_events(
+        registry: &mio::Registry,
+        token: Token,
+        events: Vec<multipart::MultipartEvent>,
+        current_file: &mut Option<File>,
+        current_filename: &mut Option<String>,
+        uploaded_files: &mut Vec<String>,
+        upload_count: &mut usize,
+        stream: &mut TcpStream,
+        conn_is_closing: &mut bool,
+        conn_write_buffer: &mut Vec<u8>,
+        candidates: &[Arc<ServerConfig>],
+        headers: &HashMap<String, String>,
+        route: &crate::config::RouteConfig,
+    ) {
+        for event in events {
+            match event {
+                multipart::MultipartEvent::StartPart(part_headers) => {
+                    let content_disposition = part_headers.get("Content-Disposition").map(|s| s.as_str()).unwrap_or("");
+                    let content_type = part_headers.get("Content-Type").map(|s| s.as_str());
+
+                    let mut filename = None;
+                    for part in content_disposition.split(';') {
+                        let part = part.trim();
+                        if part.starts_with("filename=") {
+                            let val = part.trim_start_matches("filename=").trim_matches('"');
+                            if !val.is_empty() {
+                                filename = Some(val.to_string());
+                            } else {
+                                let ext = content_type.map(Self::get_ext_from_content_type).unwrap_or(".bin");
+                                filename = Some(format!("upload_{}{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(), ext));
+                            }
+                        }
+                    }
+                    
+                    if let Some(fname) = filename {
+                        let safe_filename = std::path::Path::new(&fname).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(fname.clone());
+                        let mut upload_path = std::path::PathBuf::from(&route.root);
+                        upload_path.push(&safe_filename);
+                        
+                        let mut final_filename = safe_filename.clone();
+                        if upload_path.exists() {
+                            let stem = std::path::Path::new(&safe_filename).file_stem().and_then(|s| s.to_str()).unwrap_or(&safe_filename).to_string();
+                            let ext = std::path::Path::new(&safe_filename).extension().and_then(|s| s.to_str()).map(|e| format!(".{}", e)).unwrap_or_default();
+                            let mut c = 1;
+                            while upload_path.exists() {
+                                final_filename = format!("{}({}){}", stem, c, ext);
+                                upload_path = std::path::PathBuf::from(&route.root);
+                                upload_path.push(&final_filename);
+                                c += 1;
+                            }
+                        }
+                        
+                        if let Some(parent) = upload_path.parent() { std::fs::create_dir_all(parent).ok(); }
+                        
+                        println!("Start multipart file: {:?}", upload_path);
+                        match File::create(&upload_path) {
+                            Ok(f) => {
+                                *current_file = Some(f);
+                                *current_filename = Some(final_filename);
+                            }
+                            Err(_) => {
+                                Self::queue_error_static(registry, stream, token, 500, conn_is_closing, conn_write_buffer, candidates, headers);
+                                return;
+                            }
+                        }
+                    } else {
+                        *current_file = None;
+                        *current_filename = None;
+                    }
+                }
+                multipart::MultipartEvent::PartData(bytes) => {
+                    if let Some(file) = current_file {
+                        if let Err(_) = file.write_all(&bytes) {
+                            Self::queue_error_static(registry, stream, token, 500, conn_is_closing, conn_write_buffer, candidates, headers);
+                            return;
+                        }
+                    }
+                }
+                multipart::MultipartEvent::EndPart => {
+                    if let Some(file) = current_file.take() {
+                        file.sync_all().ok();
+                        if let Some(name) = current_filename.take() {
+                            uploaded_files.push(name);
+                            *upload_count += 1;
+                        }
+                    }
+                }
+                multipart::MultipartEvent::Finished => {}
+                multipart::MultipartEvent::Error(_) => {
+                    Self::queue_error_static(registry, stream, token, 400, conn_is_closing, conn_write_buffer, candidates, headers);
+                    return;
+                }
+            }
+        }
     }
 
     fn generate_autoindex_html(dir_path: &str, req_path: &str) -> io::Result<String> {
@@ -327,11 +519,15 @@ impl Server {
         Ok(html)
     }
 
-    fn queue_error(
-        conn: &mut HttpConnection,
+    fn queue_error_static(
         registry: &mio::Registry,
+        stream: &mut TcpStream,
         token: Token,
         status_code: u16,
+        conn_is_closing: &mut bool,
+        conn_write_buffer: &mut Vec<u8>,
+        candidates: &[Arc<ServerConfig>],
+        headers: &HashMap<String, String>,
     ) {
         let error_msg = match status_code {
             400 => "Bad Request",
@@ -343,7 +539,7 @@ impl Server {
         };
 
         // Resolve config to check for custom error pages
-        let config = conn.resolve_config();
+        let config = HttpConnection::resolve_config_static(headers, candidates);
 
         let body = if let Some(path) = config.error_pages.get(&status_code) {
             std::fs::read_to_string(path)
@@ -360,13 +556,31 @@ impl Server {
             body
         );
 
-        conn.write_buffer.extend_from_slice(response.as_bytes());
-        conn.is_closing = true;
+        conn_write_buffer.extend_from_slice(response.as_bytes());
+        *conn_is_closing = true;
 
         let _ = registry.reregister(
-            &mut conn.stream,
+            stream,
             token,
             Interest::READABLE.add(Interest::WRITABLE),
+        );
+    }
+
+    fn queue_error(
+        conn: &mut HttpConnection,
+        registry: &mio::Registry,
+        token: Token,
+        status_code: u16,
+    ) {
+        Self::queue_error_static(
+            registry,
+            &mut conn.stream,
+            token,
+            status_code,
+            &mut conn.is_closing,
+            &mut conn.write_buffer,
+            &conn.candidates,
+            &conn.request.headers,
         );
     }
 
@@ -379,7 +593,7 @@ impl Server {
         let method = conn.request.method.clone();
 
         // Resolve the correct configuration for this request
-        let config = conn.resolve_config();
+        let config = HttpConnection::resolve_config_static(&conn.request.headers, &conn.candidates);
 
         // 1. Longest Prefix Match to find the route
         let route = match config.find_route(&path) {
@@ -417,10 +631,74 @@ impl Server {
         // 4. Method Dispatch
         match method.as_str() {
             "GET" => Self::handle_get(conn, registry, token, route, &path)?,
-            "POST" => Self::handle_post(conn, registry, token, route)?,
+            "POST" => {
+                // If it was Raw Upload, it's already done (streamed to file).
+                // We just need to send response.
+                // We consume the body handler state to avoid borrow issues
+                let mut handler = std::mem::replace(&mut conn.body_handler, BodyHandler::None);
+                
+                match handler {
+                    BodyHandler::File { ref mut file, ref path } => {
+                        // File is closed when dropped or we can sync it.
+                        file.sync_all().ok();
+                        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                        let response_body = "File uploaded successfully (streamed)";
+                        let response = format!(
+                            "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nLocation: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                            response_body.len(),
+                            filename,
+                            response_body
+                        );
+                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                    }
+                    BodyHandler::Multipart { ref uploaded_files, upload_count, .. } => {
+                        let response_body = format!("Uploaded {} files successfully:\n{}", upload_count, uploaded_files.join("\n"));
+                        let response = format!(
+                            "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                            response_body.len(),
+                            response_body
+                        );
+                        conn.write_buffer.extend_from_slice(response.as_bytes());
+                    }
+                    BodyHandler::Buffer(ref body_data) => {
+                         // Fallback for buffered non-multipart POST (if any case hits this)
+                            let content_type = conn
+                                .request
+                                .headers
+                                .get("content-type")
+                                .map(|s| s.as_str())
+                                .unwrap_or("application/octet-stream");
+                                
+                            let extension = Self::get_ext_from_content_type(content_type);
+                            let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+                            let filename = format!("upload_{}{}", timestamp, extension);
+                            let mut upload_path = std::path::PathBuf::from(&route.root);
+                            upload_path.push(&filename);
+                            
+                            if let Some(p) = upload_path.parent() { std::fs::create_dir_all(p).ok(); }
+                            
+                            if let Ok(mut f) = File::create(&upload_path) {
+                                f.write_all(body_data).ok();
+                                let response_body = "File uploaded successfully (buffered)";
+                                let response = format!(
+                                    "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nLocation: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                                    response_body.len(),
+                                    filename,
+                                    response_body
+                                );
+                                conn.write_buffer.extend_from_slice(response.as_bytes());
+                            } else {
+                                Self::queue_error(conn, registry, token, 500);
+                            }
+                    }
+                    BodyHandler::None => {
+                        // POST with no body?
+                        Self::queue_error(conn, registry, token, 400); 
+                    }
+                }
+            }
             "DELETE" => Self::handle_delete(conn, registry, token, route, &path)?,
             _ => {
-                // Should have been caught by method check, but safe fallback
                 Self::queue_error(conn, registry, token, 405);
                 return Ok(());
             }
@@ -476,181 +754,6 @@ impl Server {
             }
         } else {
             Self::queue_error(conn, registry, token, 404);
-        }
-        Ok(())
-    }
-
-    fn handle_post(
-        conn: &mut HttpConnection,
-        registry: &mio::Registry,
-        token: Token,
-        route: &crate::config::RouteConfig,
-    ) -> io::Result<()> {
-        let content_type = conn
-            .request
-            .headers
-            .get("content-type")
-            .map(|s| s.as_str())
-            .unwrap_or("application/octet-stream");
-
-        // Check for multipart
-        let boundary = content_type
-            .split("boundary=")
-            .nth(1)
-            .map(|b| b.trim())
-            .unwrap_or("");
-        dbg!(&conn.request.headers);
-        dbg!(String::from_utf8(conn.request.body.clone()).unwrap());
-        if boundary != "" {
-            if !boundary.is_empty() {
-                println!("Handling Multipart Upload with boundary: {}", boundary);
-                let parts = multipart::parse_multipart(&conn.request.body, boundary);
-                let mut uploaded_count = 0;
-
-                let mut uploaded_files = Vec::new();
-
-                for part in parts {
-                    // Determine filename behavior:
-                    // 1. Missing 'filename' attribute -> Skip (likely a regular form field)
-                    // 2. Empty 'filename' value ("") -> Generate a unique name
-                    // 3. Provided 'filename' -> Use it
-                    let mut filename = match part.filename {
-                        None => continue, // Case 1: Skip
-                        Some(f) if f.is_empty() => {
-                            // Case 2: Generate
-                            let ext = part.content_type.as_deref()
-                                .map(Self::get_ext_from_content_type)
-                                .unwrap_or(".bin");
-                            format!("upload_{}{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(), ext)
-                        }
-                        Some(f) => f, // Case 3: Use provided
-                    };
-
-                    // Construct path and sanitize
-                    let mut safe_filename = std::path::Path::new(&filename)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or(filename.clone()); 
-
-                    let mut upload_path = std::path::PathBuf::from(&route.root);
-                    upload_path.push(&safe_filename);
-
-                    // Handle duplicates by renaming (file.txt -> file(1).txt)
-                    if upload_path.exists() {
-                        let stem = std::path::Path::new(&safe_filename)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(&safe_filename)
-                            .to_string();
-                        let extension = std::path::Path::new(&safe_filename)
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|e| format!(".{}", e))
-                            .unwrap_or_default();
-                        
-                        let mut counter = 1;
-                        while upload_path.exists() {
-                            safe_filename = format!("{}({}){}", stem, counter, extension);
-                            upload_path = std::path::PathBuf::from(&route.root);
-                            upload_path.push(&safe_filename);
-                            counter += 1;
-                        }
-                        // Update filename to the resolved unique name
-                        filename = safe_filename; 
-                    }
-
-                    // Ensure parent directory exists
-                    if let Some(parent) = upload_path.parent() {
-                        if !parent.exists() {
-                            if let Err(_) = std::fs::create_dir_all(parent) {
-                                Self::queue_error(conn, registry, token, 500);
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    println!("Saving multipart file: {:?}", upload_path);
-                    match File::create(&upload_path) {
-                        Ok(mut file) => {
-                            if let Err(_) = file.write_all(&part.body) {
-                                Self::queue_error(conn, registry, token, 500);
-                                return Ok(());
-                            }
-                            uploaded_count += 1;
-                            uploaded_files.push(filename);
-                        }
-                        Err(_) => {
-                            Self::queue_error(conn, registry, token, 500);
-                            return Ok(());
-                        }
-                    }
-                }
-
-                let response_body = format!("Uploaded {} files successfully:\n{}", uploaded_count, uploaded_files.join("\n"));
-                let response = format!(
-                    "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
-                    response_body.len(),
-                    response_body
-                );
-                conn.write_buffer.extend_from_slice(response.as_bytes());
-                return Ok(());
-            }
-        }
-
-        // Fallback to raw body upload (previous behavior)
-        let extension = Self::get_ext_from_content_type(content_type);
-
-        // Generate a unique filename
-        let timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(); // Use nanos for better uniqueness
-        let filename = format!("upload_{}{}", timestamp, extension);
-
-        // Construct the full path using PathBuf for safety
-        let mut upload_path = std::path::PathBuf::from(&route.root);
-
-        // If the route has a dedicated upload directory defined (not part of RouteConfig yet, but we can assume root for now or check if root is a dir)
-        // For now, we write to route.root.
-        // Ideally, we might want to preserve the request path structure, but standard POST uploads often go to a specific store.
-        // Let's stick to the user's logic of "root + generated name".
-
-        upload_path.push(filename);
-
-        println!("Uploading to: {:?}", upload_path);
-
-        // Ensure parent directory exists (though route.root should exist)
-        if let Some(parent) = upload_path.parent() {
-            if !parent.exists() {
-                // Try to create it? Or fail?
-                // If route.root points to a non-existent dir, we might want to create it.
-                if let Err(_) = std::fs::create_dir_all(parent) {
-                    Self::queue_error(conn, registry, token, 500);
-                    return Ok(());
-                }
-            }
-        }
-
-        match File::create(&upload_path) {
-            Ok(mut file) => match file.write_all(&conn.request.body) {
-                Ok(_) => {
-                    let response_body = "File uploaded successfully";
-                    let response = format!(
-                            "HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nLocation: {}\r\nConnection: keep-alive\r\n\r\n{}",
-                            response_body.len(),
-                            upload_path.file_name().unwrap().to_string_lossy(),
-                            response_body
-                        );
-                    conn.write_buffer.extend_from_slice(response.as_bytes());
-                }
-                Err(_) => {
-                    Self::queue_error(conn, registry, token, 500);
-                }
-            },
-            Err(_) => {
-                // Failed to create file (permissions, etc.)
-                Self::queue_error(conn, registry, token, 500);
-            }
         }
         Ok(())
     }

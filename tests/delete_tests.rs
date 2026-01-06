@@ -39,7 +39,7 @@ fn test_delete_file_success() {
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).expect("Failed to connect");
     
-    let request = format!("DELETE /file_success.txt HTTP/1.1\r\nHost: {}:{}\\r\\n\r\n", host, port);
+    let request = format!("DELETE /file_success.txt HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port);
     stream.write_all(request.as_bytes()).expect("Failed to write request");
 
     let mut buffer = [0u8; 1024];
@@ -78,7 +78,7 @@ fn test_delete_directory_forbidden() {
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).expect("Failed to connect");
     
-    let request = format!("DELETE /protected_dir HTTP/1.1\r\nHost: {}:{}\\r\\n\r\n", host, port);
+    let request = format!("DELETE /protected_dir HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port);
     stream.write_all(request.as_bytes()).expect("Failed to write request");
 
     let mut buffer = [0u8; 1024];
@@ -115,7 +115,7 @@ fn test_delete_not_found() {
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).expect("Failed to connect");
     
-    let request = format!("DELETE /non_existent.txt HTTP/1.1\r\nHost: {}:{}\\r\\n\r\n", host, port);
+    let request = format!("DELETE /non_existent.txt HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port);
     stream.write_all(request.as_bytes()).expect("Failed to write request");
 
     let mut buffer = [0u8; 1024];
