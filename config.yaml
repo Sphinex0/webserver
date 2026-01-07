@@ -2,7 +2,7 @@ servers:
   - host: "127.0.0.1"
     ports: [8080]
     server_name: "proxy.local"  
-    client_max_body_size: 500
+    client_max_body_size: 10000000000
     error_pages: 
       404: "./errors/404.html"
     routes: 

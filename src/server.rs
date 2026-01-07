@@ -180,7 +180,10 @@ impl Server {
         };
 
         if event.is_readable() {
-            let mut stack_buf = [0u8; 65536]; // 64KB buffer
+            let mut stack_buf = [0u8; 4096]; // 4KB buffer for fairness
+            let mut reads = 0;
+            const MAX_READS: usize = 16;
+            
             loop {
                 match conn.stream.read(&mut stack_buf) {
                     Ok(0) => {
@@ -188,7 +191,7 @@ impl Server {
                         break;
                     }
                     Ok(n) => {
-                        println!("DEBUG: Read {} bytes", n);
+                        // println!("DEBUG: Read {} bytes", n);
                         conn.request.append_data(&stack_buf[..n]);
                         
                         // Parse Loop
@@ -196,6 +199,7 @@ impl Server {
                             let parse_result = conn.request.parse();
                             match parse_result {
                                 Ok(ParsingState::Body { remaining }) | Ok(ParsingState::ChunkBody { remaining }) => {
+                                    // println!("DEBUG: Body/Chunk State. Remaining: {}", remaining);
                                     // 1. Initialize Handler if None
                                     if matches!(conn.body_handler, BodyHandler::None) {
                                         // Resolve Route Early
@@ -329,6 +333,15 @@ impl Server {
                                     break;
                                 }
                             }
+                        }
+                        
+                        // Check yield condition
+                        reads += 1;
+                        if reads >= MAX_READS {
+                             // Yield to let other connections process
+                             // We re-register interest to ensure we get called again (if data remains in kernel buffer)
+                             self.poll.registry().reregister(&mut conn.stream, token, Interest::READABLE).ok();
+                             break;
                         }
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
