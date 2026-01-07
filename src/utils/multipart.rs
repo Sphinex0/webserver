@@ -126,7 +126,30 @@ impl MultipartParser {
     }
 
     fn find_delimiter(&self, delim: &[u8]) -> Option<usize> {
-        self.buffer.windows(delim.len()).position(|window| window == delim)
+        if delim.is_empty() || self.buffer.len() < delim.len() {
+            return None;
+        }
+
+        let first_byte = delim[0];
+        let mut search_start = 0;
+
+        while let Some(pos) = self.buffer[search_start..].iter().position(|&b| b == first_byte) {
+            let absolute_pos = search_start + pos;
+            
+            // Check bounds
+            if absolute_pos + delim.len() > self.buffer.len() {
+                return None; // Not enough bytes left for full delimiter
+            }
+
+            // Check full match
+            if &self.buffer[absolute_pos..absolute_pos + delim.len()] == delim {
+                return Some(absolute_pos);
+            }
+
+            // Continue search from next byte
+            search_start = absolute_pos + 1;
+        }
+        None
     }
 
     fn find_double_crlf(&self) -> Option<usize> {

@@ -102,6 +102,7 @@ impl HttpRequest {
                             .unwrap_or(0);
 
                         if content_length > 0 {
+                        
                             self.state = ParsingState::Body { remaining: content_length };
                         } else {
                             self.state = ParsingState::Complete;
