@@ -95,6 +95,7 @@ impl HttpRequest {
                         .unwrap_or(false);
 
                     if is_chunked {
+                        println!("chunked");
                         self.state = ParsingState::ChunkSize;
                     } else {
                         let content_length = self.headers.get("content-length")

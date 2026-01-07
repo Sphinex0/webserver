@@ -343,6 +343,11 @@ impl Server {
                              self.poll.registry().reregister(&mut conn.stream, token, Interest::READABLE).ok();
                              break;
                         }
+
+                        // If we decided to close (e.g. error sent), stop reading
+                        if conn.is_closing {
+                            break;
+                        }
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(e) => {
@@ -355,6 +360,7 @@ impl Server {
         }
 
         if event.is_writable() {
+            dbg!(String::from_utf8_lossy(&conn.write_buffer.clone()));
             if !conn.write_buffer.is_empty() {
                 match conn.stream.write(&conn.write_buffer) {
                     Ok(bytes_written) => {
