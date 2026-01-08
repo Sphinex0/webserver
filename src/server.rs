@@ -299,8 +299,96 @@ impl Server {
                                                 vec.extend_from_slice(data);
                                             }
                                             BodyHandler::Multipart { parser, current_file, current_filename, uploaded_files, upload_count } => {
-                                                let events = parser.process(data);
-                                                Self::handle_multipart_events(self.poll.registry(), token, events, current_file, current_filename, uploaded_files, upload_count, &mut conn.stream, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers, conn.current_route.as_ref().unwrap());
+                                                // Use zero-copy sink API to write parts directly to file
+                                                let route = conn.current_route.as_ref().unwrap().clone();
+                                                let registry = self.poll.registry();
+
+                                                parser.process_to_sink(data, |event| {
+                                                    use crate::utils::multipart::MultipartEventRef;
+                                                    match event {
+                                                        MultipartEventRef::StartPart(part_headers) => {
+                                                            let content_disposition = part_headers.get("Content-Disposition").map(|s| s.as_str()).unwrap_or("");
+                                                            let content_type = part_headers.get("Content-Type").map(|s| s.as_str());
+
+                                                            let mut filename = None;
+                                                            for part in content_disposition.split(';') {
+                                                                let part = part.trim();
+                                                                if part.starts_with("filename=") {
+                                                                    let val = part.trim_start_matches("filename=").trim_matches('"');
+                                                                    if !val.is_empty() {
+                                                                        filename = Some(val.to_string());
+                                                                    } else {
+                                                                        let ext = content_type.map(Self::get_ext_from_content_type).unwrap_or(".bin");
+                                                                        filename = Some(format!("upload_{}{}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos(), ext));
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if let Some(fname) = filename {
+                                                                let safe_filename = std::path::Path::new(&fname).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(fname.clone());
+                                                                let mut upload_path = std::path::PathBuf::from(&route.root);
+                                                                upload_path.push(&safe_filename);
+
+                                                                let mut final_filename = safe_filename.clone();
+                                                                if upload_path.exists() {
+                                                                    let stem = std::path::Path::new(&safe_filename).file_stem().and_then(|s| s.to_str()).unwrap_or(&safe_filename).to_string();
+                                                                    let ext = std::path::Path::new(&safe_filename).extension().and_then(|s| s.to_str()).map(|e| format!(".{}", e)).unwrap_or_default();
+                                                                    let mut c = 1;
+                                                                    while upload_path.exists() {
+                                                                        final_filename = format!("{}({}){}", stem, c, ext);
+                                                                        upload_path = std::path::PathBuf::from(&route.root);
+                                                                        upload_path.push(&final_filename);
+                                                                        c += 1;
+                                                                    }
+                                                                }
+
+                                                                if let Some(parent) = upload_path.parent() { std::fs::create_dir_all(parent).ok(); }
+
+                                                                println!("Start multipart file: {:?}", upload_path);
+                                                                match File::create(&upload_path) {
+                                                                    Ok(f) => {
+                                                                        *current_file = Some(f);
+                                                                        *current_filename = Some(final_filename);
+                                                                    }
+                                                                    Err(_) => {
+                                                                        Self::queue_error_static(registry, &mut conn.stream, token, 500, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                                        return false;
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                *current_file = None;
+                                                                *current_filename = None;
+                                                            }
+                                                            true
+                                                        }
+                                                        MultipartEventRef::PartData(bytes) => {
+                                                            if let Some(file) = current_file {
+                                                                if let Err(_) = file.write_all(bytes) {
+                                                                    Self::queue_error_static(registry, &mut conn.stream, token, 500, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                                    return false;
+                                                                }
+                                                            }
+                                                            true
+                                                        }
+                                                        MultipartEventRef::EndPart => {
+                                                            if let Some(file) = current_file.take() {
+                                                                file.sync_all().ok();
+                                                                if let Some(name) = current_filename.take() {
+                                                                    uploaded_files.push(name);
+                                                                    *upload_count += 1;
+                                                                }
+                                                            }
+                                                            true
+                                                        }
+                                                        MultipartEventRef::Finished => {
+                                                            true
+                                                        }
+                                                        MultipartEventRef::Error(_) => {
+                                                            Self::queue_error_static(registry, &mut conn.stream, token, 400, &mut conn.is_closing, &mut conn.write_buffer, &conn.candidates, &conn.request.headers);
+                                                            return false;
+                                                        }
+                                                    }
+                                                });
                                             }
                                             BodyHandler::None => {} 
                                         }
@@ -360,7 +448,7 @@ impl Server {
         }
 
         if event.is_writable() {
-            dbg!(String::from_utf8_lossy(&conn.write_buffer.clone()));
+            dbg!(&conn.write_buffer.len());
             if !conn.write_buffer.is_empty() {
                 match conn.stream.write(&conn.write_buffer) {
                     Ok(bytes_written) => {
