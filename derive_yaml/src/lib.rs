@@ -1,144 +1,187 @@
 extern crate proc_macro;
-use proc_macro::{TokenStream, TokenTree, Delimiter};
+
+use proc_macro::{Delimiter, TokenStream, TokenTree};
 
 #[proc_macro_derive(FromYaml)]
 pub fn derive_from_yaml(input: TokenStream) -> TokenStream {
+    let struct_name = match extract_struct_name(input.clone()) {
+        Some(name) => name,
+        None => return quote_error("Failed to extract struct name"),
+    };
+
+    let fields = match extract_struct_fields(input) {
+        Some(f) => f,
+        None => return quote_error("Failed to extract struct fields"),
+    };
+
+    let arms = generate_match_arms(&fields);
+    let flags = generate_field_flags(&fields);
+
+    let code = format_impl_code(&struct_name, &flags, &arms);
+
+    code.parse().unwrap_or_else(|_| quote_error("Generated code was invalid"))
+}
+
+// ====== Field Extraction ======
+
+fn extract_struct_name(input: TokenStream) -> Option<String> {
     let mut tokens = input.into_iter();
-    let mut struct_name = String::new();
-    let mut fields = Vec::new();
 
     while let Some(token) = tokens.next() {
-        if let TokenTree::Ident(ident) = &token {
+        if let TokenTree::Ident(ident) = token {
             if ident.to_string() == "struct" {
                 if let Some(TokenTree::Ident(name)) = tokens.next() {
-                    struct_name = name.to_string();
-                    break;
+                    return Some(name.to_string());
                 }
             }
         }
     }
 
-    while let Some(token) = tokens.next() {
+    None
+}
+
+fn extract_struct_fields(input: TokenStream) -> Option<Vec<String>> {
+    let tokens: Vec<TokenTree> = input.into_iter().collect();
+    let mut fields = Vec::new();
+
+    // Find the opening brace
+    for token in tokens.iter() {
         if let TokenTree::Group(group) = token {
             if group.delimiter() == Delimiter::Brace {
-                let mut group_iter = group.stream().into_iter();
-                let mut last_ident = String::new();
-                while let Some(inner_token) = group_iter.next() {
-                    match inner_token {
-                        TokenTree::Ident(ident) => {
-                            let s = ident.to_string();
-                            if s != "pub" && s != "ConfigParser" && s != "ParseResult" && s != "FromYaml" {
-                                last_ident = s;
-                            }
-                        }
-                        TokenTree::Punct(punct) => {
-                            if punct.as_char() == ':' {
-                                if !last_ident.is_empty() {
-                                    fields.push(last_ident.clone());
-                                    last_ident.clear();
-                                }
-                                while let Some(skip_token) = group_iter.next() {
-                                     if let TokenTree::Punct(p) = &skip_token {
-                                         if p.as_char() == ',' { break; }
-                                     }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                break;
+                parse_field_names(group.stream(), &mut fields);
+                return Some(fields);
             }
         }
     }
 
-        let q = char::from(34);
-        let mut flags = String::new();
-        let mut arms = String::new();
-        
-            for field in &fields {
-        
-                flags.push_str(&format!("let mut seen_{} = false;\n", field));
-        
-                
-        
-                let arm = format!(
-        
-                    "{0}{1}{0} => {{ 
-        
-                        if seen_{1} {{
-        
-                            return Err(crate::config::ConfigError {{
-        
-                                message: format!({0}Duplicate field '{1}'{0}),
-        
-                                loc: parser.peek_loc(),
-        
-                                context: vec![]
-        
-                            }});
-        
-                        }}
-        
-                        seen_{1} = true;
-        
-                        parser.consume_key(&key)?; 
-        
-                        obj.{1} = FromYaml::from_yaml(parser, min_indent)
-        
-                            .map_err(|mut e| {{ e.context.push(format!({0}parsing field '{1}'{0})); e }})?; 
-        
-                    }},
-        
-        ",
-        
-                    q, field
-        
-                );
-        
-                arms.push_str(&arm);
-        
+    None
+}
+
+fn parse_field_names(group_stream: TokenStream, fields: &mut Vec<String>) {
+    let mut group_iter = group_stream.into_iter();
+    let mut last_ident = String::new();
+
+    while let Some(inner_token) = group_iter.next() {
+        match inner_token {
+            TokenTree::Ident(ident) => {
+                let s = ident.to_string();
+                // Skip keywords and type hints
+                if !is_keyword_or_type(&s) {
+                    last_ident = s;
+                }
             }
-        
-        
-        
-            let mut code = "impl FromYaml for STRUCT {
-        
-            fn from_yaml(parser: &mut crate::config::ConfigParser, min_indent: usize) -> crate::config::ParseResult<Self> {
-        
-                let mut obj = Self::default();
-        
-                let mut struct_indent: Option<usize> = None;
-        
-                FLAGS
-        
-                loop {            if !parser.check_indentation(min_indent, &mut struct_indent)? {
+            TokenTree::Punct(punct) => {
+                if punct.as_char() == ':' {
+                    if !last_ident.is_empty() {
+                        fields.push(last_ident.clone());
+                        last_ident.clear();
+                    }
+                    // Skip until comma
+                    skip_to_comma(&mut group_iter);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_keyword_or_type(s: &str) -> bool {
+    matches!(s, "pub" | "ConfigParser" | "ParseResult" | "FromYaml")
+}
+
+fn skip_to_comma(iter: &mut impl Iterator<Item = TokenTree>) {
+    while let Some(token) = iter.next() {
+        if let TokenTree::Punct(p) = token {
+            if p.as_char() == ',' {
                 break;
             }
-            if parser.is_end_of_block() {
+        }
+    }
+}
+
+// ====== Code Generation ======
+
+fn generate_field_flags(fields: &[String]) -> String {
+    let mut flags = String::new();
+
+    for field in fields {
+        flags.push_str(&format!("let mut seen_{} = false;\n", field));
+    }
+
+    flags
+}
+
+fn generate_match_arms(fields: &[String]) -> String {
+    let mut arms = String::new();
+
+    for field in fields {
+        arms.push_str(&format!(
+            r#"{q}{field}{q} => {{
+    if seen_{field} {{
+        return Err(crate::config::ConfigError {{
+            message: format!({q}Duplicate field '{field}'{q}),
+            loc: parser.peek_loc(),
+            context: vec![]
+        }});
+    }}
+    seen_{field} = true;
+    parser.consume_key(&key)?;
+    obj.{field} = FromYaml::from_yaml(parser, min_indent)
+        .map_err(|mut e| {{ e.context.push(format!({q}parsing field '{field}'{q})); e }})?;
+}},
+"#,
+            field = field,
+            q = "\""
+        ));
+    }
+
+    arms
+}
+
+fn format_impl_code(struct_name: &str, flags: &str, arms: &str) -> String {
+    format!(
+        r#"impl FromYaml for {struct_name} {{
+    fn from_yaml(parser: &mut crate::config::ConfigParser, min_indent: usize) -> crate::config::ParseResult<Self> {{
+        let mut obj = Self::default();
+        let mut struct_indent: Option<usize> = None;
+        {flags}
+        loop {{
+            if !parser.check_indentation(min_indent, &mut struct_indent)? {{
                 break;
-            }
-            let key = match parser.parse_map_key()? {
+            }}
+            if parser.is_end_of_block() {{
+                break;
+            }}
+            let key = match parser.parse_map_key()? {{
                 Some(k) => k,
                 None => break,
-            };
+            }};
 
-            match key.as_str() {
-                ARMS
-                _ => {
-                    eprintln!(\"Warning: Unknown field '{}'\", key);
+            match key.as_str() {{
+                {arms}
+                _ => {{
+                    eprintln!("Warning: Unknown field {{}}", key);
                     parser.consume_key(&key)?;
                     parser.skip_value(struct_indent.unwrap_or(min_indent))?;
-                }
-            }
-        }
+                }}
+            }}
+        }}
         Ok(obj)
-    }
-}".to_string();
+    }}
+}}"#,
+        struct_name = struct_name,
+        flags = flags,
+        arms = arms
+    )
+}
 
-    code = code.replace("STRUCT", &struct_name);
-    code = code.replace("FLAGS", &flags);
-    code = code.replace("ARMS", &arms);
+// ====== Error Handling ======
 
-    code.parse().expect("Generated code was invalid")
+fn quote_error(msg: &str) -> TokenStream {
+    format!(
+        "compile_error!(\"FromYaml derive error: {}\");",
+        msg
+    )
+    .parse()
+    .unwrap()
 }

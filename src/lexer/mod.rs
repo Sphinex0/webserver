@@ -1,7 +1,7 @@
 pub mod tokens;
+
 use std::iter::Peekable;
 use std::str::Chars;
-
 use crate::lexer::tokens::{Loc, Token, TokenType};
 
 pub struct Lexer<'a> {
@@ -17,137 +17,183 @@ impl<'a> Lexer<'a> {
 
     fn advance(&mut self) {
         if let Some(c) = self.input.next() {
-            if c == '\n' { self.line += 1; self.col = 1; } 
-            else { self.col += 1; }
+            if c == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
         }
     }
 
-    fn peek(&mut self) -> Option<&char> { self.input.peek() }
+    fn peek(&mut self) -> Option<&char> {
+        self.input.peek()
+    }
+
+    fn current_loc(&self) -> Loc {
+        Loc { line: self.line, col: self.col }
+    }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
         let mut tokens = Vec::new();
         let mut is_start_of_line = true;
 
-        while let Some(&c) = self.peek() {
-            let loc = Loc { line: self.line, col: self.col };
-
-            // 1. Handle Indentation at start of line
-            if is_start_of_line && c != '\n' {
-                let mut spaces = 0;
-                if c.is_whitespace() {
-                    while let Some(&w) = self.peek() {
-                        if w == ' ' { spaces += 1; self.advance(); }
-                        else if w == '\t' { spaces += 4; self.advance(); } // Soft tab
-                        else { break; }
-                    }
-                }
-                
-                // Emit indent only if relevant content follows
-                if let Some(&next) = self.peek() {
-                    if next != '\n' && next != '#' {
-                        tokens.push(Token { kind: TokenType::Indent(spaces), loc });
-                    }
-                }
+        while self.peek().is_some() {
+            if is_start_of_line && *self.peek().unwrap() != '\n' {
+                self.handle_indentation(&mut tokens)?;
                 is_start_of_line = false;
                 continue;
             }
 
-            // 2. Skip Comments
+            let loc = self.current_loc();
+            let c = *self.peek().unwrap();
+
+            // Skip comments
             if c == '#' {
-                while let Some(&n) = self.peek() {
-                    if n == '\n' { break; }
-                    self.advance();
-                }
+                self.skip_comment();
                 continue;
             }
 
             match c {
-                // 3. Structural Symbols
-                ':' => { tokens.push(Token { kind: TokenType::Colon, loc }); self.advance(); is_start_of_line = false; }
-                '-' => { 
-                    self.advance(); // Consume the dash first
-                    
-                    // Now peek checks the next character
-                    let next_is_separator = match self.peek() {
-                        Some(n) => n.is_whitespace(), 
-                        None => true, 
-                    };
-
-                    if next_is_separator {
-                        tokens.push(Token { kind: TokenType::Dash, loc }); 
-                        is_start_of_line = false; 
-                    } else {
-                        // Treat as text start
-                        let mut val = String::from("-");
-                        
-                        while let Some(&n) = self.peek() {
-                            if n.is_alphanumeric() || "._-/".contains(n) {
-                                val.push(n);
-                                self.advance();
-                            } else { break; }
-                        }
-                        tokens.push(Token { kind: TokenType::Text(val), loc });
-                        is_start_of_line = false;
-                    }
+                ':' => {
+                    tokens.push(Token { kind: TokenType::Colon, loc });
+                    self.advance();
                 }
-                '[' => { tokens.push(Token { kind: TokenType::LBracket, loc }); self.advance(); is_start_of_line = false; }
-                ']' => { tokens.push(Token { kind: TokenType::RBracket, loc }); self.advance(); is_start_of_line = false; }
-                ',' => { tokens.push(Token { kind: TokenType::Comma, loc }); self.advance(); is_start_of_line = false; }
-                
-                // 4. Newline (Reset start_of_line)
-                '\n' => { 
-                    tokens.push(Token { kind: TokenType::Newline, loc }); 
-                    self.advance(); 
-                    is_start_of_line = true; 
+                '-' => self.handle_dash(&mut tokens, loc)?,
+                '[' => {
+                    tokens.push(Token { kind: TokenType::LBracket, loc });
+                    self.advance();
                 }
-
-                // 5. Quoted Strings "host"
-                '"' => {
-                    self.advance(); // consume opening quote
-                    let mut val = String::new();
-                    while let Some(&next_c) = self.peek() {
-                        if next_c == '"' { self.advance(); break; }
-                        val.push(next_c);
-                        self.advance();
-                    }
-                    tokens.push(Token { kind: TokenType::StringLit(val), loc });
-                    is_start_of_line = false;
+                ']' => {
+                    tokens.push(Token { kind: TokenType::RBracket, loc });
+                    self.advance();
                 }
-
-                // 6. Generic Whitespace (Skip it! This fixes "ports :")
-                c if c.is_whitespace() => { self.advance(); }
-
-                // 7. Text/Numbers
-                _ => {
-                    let mut val = String::new();
-                    while let Some(&n) = self.peek() {
-                        // Allow dots and slashes in text (e.g. 127.0.0.1 or /bin/bash)
-                        if n.is_alphanumeric() || "._-/".contains(n) {
-                            val.push(n);
-                            self.advance();
-                        } else { break; }
-                    }
-                    
-                    if val.is_empty() {
-                        // Unknown character (e.g. '%', '@', etc.)
-                        // Advance to prevent infinite loop and optionally return error
-                        let char_opt = self.peek().copied(); 
-                        if let Some(c) = char_opt {
-                             return Err(format!("Unexpected character: '{}' at line {}, col {}", c, self.line, self.col));
-                        } else {
-                             break; // EOF
-                        }
-                    }
-
-                    if let Ok(num) = val.parse::<u64>() {
-                        tokens.push(Token { kind: TokenType::Number(num), loc });
-                    } else {
-                        tokens.push(Token { kind: TokenType::Text(val), loc });
-                    }
-                    is_start_of_line = false;
+                ',' => {
+                    tokens.push(Token { kind: TokenType::Comma, loc });
+                    self.advance();
                 }
+                '\n' => {
+                    tokens.push(Token { kind: TokenType::Newline, loc });
+                    self.advance();
+                    is_start_of_line = true;
+                }
+                '"' => self.handle_quoted_string(&mut tokens, loc),
+                c if c.is_whitespace() => {
+                    self.advance();
+                }
+                _ => self.handle_text_or_number(&mut tokens, loc)?,
             }
         }
+
         Ok(tokens)
+    }
+
+    fn handle_indentation(&mut self, tokens: &mut Vec<Token>) -> Result<(), String> {
+        let loc = self.current_loc();
+        let mut spaces = 0;
+
+        while let Some(&w) = self.peek() {
+            match w {
+                ' ' => {
+                    spaces += 1;
+                    self.advance();
+                }
+                '\t' => {
+                    spaces += 4; // Tab counts as 4 spaces
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        // Emit indent only if relevant content follows
+        if let Some(&next) = self.peek() {
+            if next != '\n' && next != '#' {
+                tokens.push(Token { kind: TokenType::Indent(spaces), loc });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn skip_comment(&mut self) {
+        while let Some(&c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn handle_dash(&mut self, tokens: &mut Vec<Token>, loc: Loc) -> Result<(), String> {
+        self.advance(); // Consume the dash
+
+        let next_is_separator = match self.peek() {
+            Some(n) => n.is_whitespace(),
+            None => true,
+        };
+
+        if next_is_separator {
+            tokens.push(Token { kind: TokenType::Dash, loc });
+        } else {
+            // Part of a text token like "-flag"
+            let mut val = String::from("-");
+            while let Some(&n) = self.peek() {
+                if n.is_alphanumeric() || "._-/".contains(n) {
+                    val.push(n);
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token { kind: TokenType::Text(val), loc });
+        }
+
+        Ok(())
+    }
+
+    fn handle_quoted_string(&mut self, tokens: &mut Vec<Token>, loc: Loc) {
+        self.advance(); // Consume opening quote
+        let mut val = String::new();
+
+        while let Some(&c) = self.peek() {
+            if c == '"' {
+                self.advance();
+                break;
+            }
+            val.push(c);
+            self.advance();
+        }
+
+        tokens.push(Token { kind: TokenType::StringLit(val), loc });
+    }
+
+    fn handle_text_or_number(&mut self, tokens: &mut Vec<Token>, loc: Loc) -> Result<(), String> {
+        let mut val = String::new();
+
+        while let Some(&n) = self.peek() {
+            if n.is_alphanumeric() || "._-/".contains(n) {
+                val.push(n);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if val.is_empty() {
+            let c = *self.peek().unwrap();
+            return Err(format!(
+                "Unexpected character: '{}' at line {}, col {}",
+                c, self.line, self.col
+            ));
+        }
+
+        if let Ok(num) = val.parse::<u64>() {
+            tokens.push(Token { kind: TokenType::Number(num), loc });
+        } else {
+            tokens.push(Token { kind: TokenType::Text(val), loc });
+        }
+
+        Ok(())
     }
 }

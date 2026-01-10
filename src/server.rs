@@ -415,8 +415,8 @@ impl Server {
                                 Ok(_) => {
                                     break;
                                 }
-                                Err(e) => {
-                                    // println!("DEBUG: Parser Error: {}", e);
+                                Err(_e) => {
+                                    // println!("DEBUG: Parser Error: {}", _e);
                                     conn.is_closing = true;
                                     break;
                                 }
@@ -438,8 +438,8 @@ impl Server {
                         }
                     }
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                    Err(e) => {
-                        // println!("DEBUG: Read Error: {}", e);
+                    Err(_e) => {
+                        // println!("DEBUG: Read Error: {}", _e);
                         conn.is_closing = true;
                         break;
                     }

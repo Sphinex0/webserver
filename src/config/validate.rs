@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, fs::ReadDir};
+use std::collections::{HashMap, HashSet};
 use crate::config::types::ServerConfig;
 
 pub fn validate_configs(configs: Vec<ServerConfig>) -> Vec<ServerConfig> {
