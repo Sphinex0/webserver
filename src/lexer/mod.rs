@@ -77,7 +77,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     is_start_of_line = true;
                 }
-                '"' => self.handle_quoted_string(&mut tokens, loc),
+                q if q == '"' || q == '\'' => self.handle_quoted_string(&mut tokens, loc, q),
                 c if c.is_whitespace() => {
                     self.advance();
                 }
@@ -152,12 +152,12 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    fn handle_quoted_string(&mut self, tokens: &mut Vec<Token>, loc: Loc) {
+    fn handle_quoted_string(&mut self, tokens: &mut Vec<Token>, loc: Loc, quote_char: char) {
         self.advance(); // Consume opening quote
         let mut val = String::new();
 
         while let Some(&c) = self.peek() {
-            if c == '"' {
+            if c == quote_char {
                 self.advance();
                 break;
             }
